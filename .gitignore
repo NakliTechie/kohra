@@ -1,6 +1,9 @@
 # Local working notes — never committed
 plan/
 
+# External reference clones — never committed
+vendor/
+
 # OS junk
 .DS_Store
 Thumbs.db

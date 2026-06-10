@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kohra — text diffusion in the browser</title>
+<style>
+  :root { --fg:#e8e6e3; --bg:#14161a; --dim:#8a8f98; --acc:#7aa2f7; --mask:#3b4261; --fresh:#9ece6a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main { max-width: 880px; margin: 0 auto; padding: 24px 16px 80px; }
+  h1 { font-size: 18px; font-weight: 600; }
+  h1 small { color: var(--dim); font-weight: 400; }
+  #status { color: var(--dim); min-height: 1.5em; white-space: pre-wrap; }
+  textarea { width:100%; background:#1b1e25; color:var(--fg); border:1px solid #2a2e37; border-radius:8px; padding:10px; font:inherit; min-height:64px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:10px 0; }
+  label { color:var(--dim); font-size:13px; }
+  input[type=number] { width:72px; background:#1b1e25; color:var(--fg); border:1px solid #2a2e37; border-radius:6px; padding:4px 6px; font:inherit; }
+  button { background:var(--acc); color:#10131a; border:0; border-radius:8px; padding:8px 18px; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.4; cursor:default; }
+  #canvas { background:#1b1e25; border:1px solid #2a2e37; border-radius:8px; padding:14px; margin-top:14px; min-height:120px; white-space:pre-wrap; word-break:break-word; }
+  .tok-mask { color:var(--mask); }
+  .tok-fresh { color:var(--fresh); }
+  #perf { color:var(--dim); font-size:13px; margin-top:8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>kohra <small>— masked-diffusion text generation, fully in your browser (WebGPU)</small></h1>
+  <p id="status">Loading…</p>
+  <textarea id="prompt">Lily runs 12 km/h for 4 hours. How far in 8 hours?</textarea>
+  <div class="row">
+    <label>new tokens <input id="maxNew" type="number" value="128" step="32" min="16"></label>
+    <label>steps <input id="steps" type="number" value="128" step="16" min="4"></label>
+    <label>block <input id="blockSize" type="number" value="32" step="8" min="8"></label>
+    <button id="go" disabled>Generate</button>
+  </div>
+  <div id="canvas"></div>
+  <div id="perf"></div>
+</main>
+
+<script type="module">
+// G1 harness: serve this folder + ../models over http (python3 -m http.server),
+// open with ?model=../models/qwen3-0.6b-mdlm-onnx/model_fp16.onnx
+import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/ort.webgpu.min.mjs';
+import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm';
+
+const MODEL_ID = 'dllm-hub/Qwen3-0.6B-diffusion-mdlm-v0.1';
+const MASK_ID = 151669n, EOS_ID = 151645n;
+const $ = (id) => document.getElementById(id);
+const status = (t) => { $('status').textContent = t; };
+
+const params = new URLSearchParams(location.search);
+const modelUrl = params.get('model') ?? '../models/qwen3-0.6b-mdlm-onnx/model_fp16.onnx';
+
+let sess, tokenizer;
+
+// per-block reveal counts — linear alpha scheduler, deterministic (mirrors scripts/sample_onnx.py)
+function transferSchedule(nMasked, steps) {
+  const ks = []; let remaining = nMasked;
+  for (let i = 0; i < steps && remaining > 0; i++) {
+    const k = Math.min(Math.round(remaining / (steps - i)), remaining);
+    if (k > 0) { ks.push(k); remaining -= k; }
+  }
+  return ks;
+}
+
+function renderCanvas(x, P, fresh) {
+  const el = $('canvas'); el.textContent = '';
+  for (let i = P; i < x.length; i++) {
+    const span = document.createElement('span');
+    if (x[i] === MASK_ID) { span.className = 'tok-mask'; span.textContent = '▒'; }
+    else {
+      span.textContent = tokenizer.decode([Number(x[i])]);
+      if (fresh.has(i)) span.className = 'tok-fresh';
+    }
+    el.appendChild(span);
+  }
+}
+
+async function generate() {
+  $('go').disabled = true;
+  const maxNew = +$('maxNew').value, steps = +$('steps').value, blockSize = +$('blockSize').value;
+  const promptIds = tokenizer.apply_chat_template(
+    [{ role: 'user', content: $('prompt').value }],
+    { add_generation_prompt: true, tokenize: true }
+  )[0] ?? tokenizer.apply_chat_template(
+    [{ role: 'user', content: $('prompt').value }],
+    { add_generation_prompt: true }
+  );
+
+  const P = promptIds.length, T = P + maxNew;
+  const x = new BigInt64Array(T).fill(EOS_ID);
+  promptIds.forEach((t, i) => { x[i] = BigInt(t); });
+  for (let i = P; i < T; i++) x[i] = MASK_ID;
+
+  const numBlocks = Math.ceil(maxNew / blockSize);
+  const stepsPerBlock = Math.ceil(steps / numBlocks);
+  let nForwards = 0; const t0 = performance.now();
+
+  for (let b = 0; b < numBlocks; b++) {
+    const start = P + b * blockSize, end = Math.min(start + blockSize, T);
+    let nMasked = 0;
+    for (let i = start; i < end; i++) if (x[i] === MASK_ID) nMasked++;
+
+    for (const k of transferSchedule(nMasked, stepsPerBlock)) {
+      const feeds = { input_ids: new ort.Tensor('int64', x.slice(), [1, T]) };
+      const out = await sess.run(feeds);
+      nForwards++;
+      const logits = out.logits.data; // Float32Array [T * V]
+      const V = out.logits.dims[2];
+
+      // candidates: masked positions inside current block
+      const cand = [];
+      for (let p = start; p < end; p++) {
+        if (x[p] !== MASK_ID) continue;
+        const off = p * V;
+        let best = 0, bestV = -Infinity, sumExp = 0, maxL = -Infinity;
+        for (let v = 0; v < V; v++) { const l = logits[off + v]; if (l > maxL) maxL = l; if (l > bestV) { bestV = l; best = v; } }
+        for (let v = 0; v < V; v++) sumExp += Math.exp(logits[off + v] - maxL);
+        cand.push({ p, tok: best, conf: Math.exp(bestV - maxL) / sumExp });
+      }
+      cand.sort((a, b2) => b2.conf - a.conf);
+      const fresh = new Set();
+      for (const { p, tok } of cand.slice(0, k)) { x[p] = BigInt(tok); fresh.add(p); }
+      renderCanvas(x, P, fresh);
+      status(`block ${b + 1}/${numBlocks} · forward ${nForwards} · ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+      await new Promise(r => requestAnimationFrame(r));
+    }
+  }
+
+  const dt = (performance.now() - t0) / 1000;
+  // trim at first EOS after prompt and show final text
+  let genEnd = T;
+  for (let i = P; i < T; i++) if (x[i] === EOS_ID) { genEnd = i; break; }
+  const text = tokenizer.decode([...x.slice(P, genEnd)].map(Number), { skip_special_tokens: true });
+  $('canvas').textContent = text;
+  const tokS = (genEnd - P) / dt;
+  $('perf').textContent = `${genEnd - P} tokens · ${nForwards} forwards · ${dt.toFixed(1)}s · ${tokS.toFixed(1)} tok/s`;
+  status('Done.');
+  $('go').disabled = false;
+}
+
+async function init() {
+  try {
+    status('Loading tokenizer…');
+    tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
+    status('Loading model… (first time downloads + compiles shaders)');
+    const opts = { executionProviders: ['webgpu'] };
+    try {
+      const externalDataUrl = modelUrl + '_data';
+      const head = await fetch(externalDataUrl, { method: 'HEAD' });
+      if (head.ok) opts.externalData = [{ path: modelUrl.split('/').pop() + '_data', data: externalDataUrl }];
+    } catch {}
+    sess = await ort.InferenceSession.create(modelUrl, opts);
+    status(`Ready — ${modelUrl} on WebGPU.`);
+    $('go').disabled = false;
+  } catch (e) {
+    console.error(e);
+    status('FAILED: ' + e.message);
+  }
+}
+
+addEventListener('error', e => status('Uncaught: ' + (e.error?.message ?? e.message)));
+addEventListener('unhandledrejection', e => status('Rejection: ' + (e.reason?.message ?? e.reason)));
+$('go').addEventListener('click', generate);
+init();
+</script>
+</body>
+</html>
