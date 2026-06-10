@@ -72,7 +72,12 @@ def parity(wrapper, onnx_path, atol, label, t_len=72):
     with torch.no_grad():
         ref = wrapper(ids).float().numpy()
 
-    sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    so = ort.SessionOptions()
+    if label != "fp32":
+        # ORT's SimplifiedLayerNormFusion crashes on the casts the fp16 converter
+        # inserts (GetIndexFromName). Same flag needed in ORT-web sessions.
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    sess = ort.InferenceSession(onnx_path, so, providers=["CPUExecutionProvider"])
     got = sess.run(["logits"], {"input_ids": ids.numpy()})[0].astype(np.float32)
 
     max_abs = float(np.max(np.abs(ref - got)))
@@ -98,22 +103,23 @@ def main():
     fp32_path = os.path.join(OUT_DIR, "model_fp32.onnx")
 
     wrapper = load_fp32()
-    export_fp32(wrapper, fp32_path)
-    parity(wrapper, fp32_path, atol=2e-3, label="fp32")
+    if os.path.exists(fp32_path):
+        print("fp32 export exists, skipping (delete to re-export)")
+    else:
+        export_fp32(wrapper, fp32_path)
+        parity(wrapper, fp32_path, atol=2e-3, label="fp32")
 
     if args.fp16 or args.q4f16:
         import onnx
-        from onnxconverter_common import float16
+        from onnxruntime.transformers.onnx_model import OnnxModel
 
+        # ORT's own converter (symbolic shape inference, no >2GB serialize) — the
+        # onnxconverter-common path emits type-inconsistent graphs on this model
         m = onnx.load(fp32_path)
-        m16 = float16.convert_float_to_float16(
-            m, keep_io_types=True, op_block_list=["Softmax"]
-        )
+        om = OnnxModel(m)
+        om.convert_float_to_float16(keep_io_types=True)
         fp16_path = os.path.join(OUT_DIR, "model_fp16.onnx")
-        onnx.save(
-            m16, fp16_path, save_as_external_data=True,
-            all_tensors_to_one_file=True, location="model_fp16.onnx_data",
-        )
+        om.save_model_to_file(fp16_path, use_external_data_format=True)
         print(f"converted fp16 -> {fp16_path}")
         parity(wrapper, fp16_path, atol=0.5, label="fp16")
 
@@ -126,8 +132,9 @@ def main():
 
         fp16_path = os.path.join(OUT_DIR, "model_fp16.onnx")
         m = onnx.load(fp16_path)
-        # symmetric block quant — the constraint that matters on ORT-web WebGPU
-        cfg = DefaultWeightOnlyQuantConfig(block_size=32, is_symmetric=True)
+        # asymmetric is fine here: the symmetric-only WebGPU constraint applies to
+        # QMoE ops (G3 / MoE models), not dense MatMulNBits
+        cfg = DefaultWeightOnlyQuantConfig(block_size=32, is_symmetric=False)
         q = MatMulNBitsQuantizer(m, algo_config=cfg)
         q.process()
         q4_path = os.path.join(OUT_DIR, "model_q4f16.onnx")

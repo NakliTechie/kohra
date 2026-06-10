@@ -146,7 +146,9 @@ async function init() {
     status('Loading tokenizer…');
     tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
     status('Loading model… (first time downloads + compiles shaders)');
-    const opts = { executionProviders: ['webgpu'] };
+    // graphOptimizationLevel: ORT's SimplifiedLayerNormFusion crashes on the
+    // fp16-converter's inserted casts (see scripts/export_onnx.py parity note)
+    const opts = { executionProviders: ['webgpu'], graphOptimizationLevel: 'disabled' };
     try {
       const externalDataUrl = modelUrl + '_data';
       const head = await fetch(externalDataUrl, { method: 'HEAD' });

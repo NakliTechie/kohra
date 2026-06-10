@@ -97,7 +97,28 @@ UX note for the browser: histories (canvas snapshot per step) make a great
   transfer cost — at T≈200 ≈ 120MB f32, so **do** consider returning only masked-position
   logits or top-k in a v2 graph).
 - bf16 weights → fp16 or q4f16 for ORT-web. No MoE in this model — the symmetric-QMoE
-  constraint only bites at G3 (LLaDA-MoE).
+  constraint only bites at G3 (LLaDA-MoE); dense MatMulNBits may use asymmetric.
+
+### Export pipeline results (2026-06-10, scripts/export_onnx.py)
+
+- **fp32**: legacy TorchScript exporter, eager attention, `use_cache=False`, opset 17,
+  dynamic axes verified at a non-trace length. Parity: max|Δlogit|=0.0001, argmax 1.0000.
+- **fp16**: `onnxruntime.transformers.OnnxModel.convert_float_to_float16(keep_io_types=True)`.
+  (`onnxconverter-common` emits type-broken graphs on this model — don't use it.)
+  Parity: max|Δlogit|=0.098, masked-argmax 0.969. **The G1 artifact** (~1.5GB).
+- **Gotcha:** ORT's `SimplifiedLayerNormFusion` crashes at session init on the converter's
+  inserted casts → create sessions with graph optimizations **disabled** (Python:
+  `ORT_DISABLE_ALL`; ORT-web: `graphOptimizationLevel: 'disabled'`).
+- **q4f16: DEFERRED.** MatMulNBits over the cast-littered fp16 graph only shrinks 1.5→1.3GB
+  and wrecks parity (masked-argmax 0.78 asym / 0.31 sym). Right recipe to try next:
+  quantize the *fp32* graph first, then fp16-convert the remainder; or reuse
+  onnx-community's conversion scripts; consider excluding `lm_head`.
+- **Full-generation check (the real gate):** `scripts/sample_onnx.py` (numpy minimal loop,
+  fp32 ONNX, CPU EP) on the math prompt → coherent AND arithmetically correct
+  (`\boxed{96}`), 128 forwards in 24.9s (0.19 s/forward — ORT CPU fp32 is ~13× faster than
+  PyTorch CPU bf16 here).
+- Cosmetic: outputs open with an empty Qwen3 `<think>\n\n</think>` block (template artifact) —
+  strip in UI or pass `enable_thinking: false` if supported.
 
 ## Perf model
 
