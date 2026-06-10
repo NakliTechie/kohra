@@ -81,13 +81,11 @@ function renderCanvas(x, P, fresh) {
 async function generate() {
   $('go').disabled = true;
   const maxNew = +$('maxNew').value, steps = +$('steps').value, blockSize = +$('blockSize').value;
-  const promptIds = tokenizer.apply_chat_template(
-    [{ role: 'user', content: $('prompt').value }],
-    { add_generation_prompt: true, tokenize: true }
-  )[0] ?? tokenizer.apply_chat_template(
-    [{ role: 'user', content: $('prompt').value }],
-    { add_generation_prompt: true }
-  );
+  // transformers 4.57 ships the template as chat_template.jinja, which
+  // Transformers.js doesn't fetch — construct ChatML by hand (verified vs
+  // Python apply_chat_template, 28 tokens for the default prompt)
+  const promptText = `<|im_start|>user\n${$('prompt').value}<|im_end|>\n<|im_start|>assistant\n`;
+  const promptIds = [...tokenizer(promptText, { add_special_tokens: false }).input_ids.data].map(Number);
 
   const P = promptIds.length, T = P + maxNew;
   const x = new BigInt64Array(T).fill(EOS_ID);
@@ -149,12 +147,16 @@ async function init() {
     // graphOptimizationLevel: ORT's SimplifiedLayerNormFusion crashes on the
     // fp16-converter's inserted casts (see scripts/export_onnx.py parity note)
     const opts = { executionProviders: ['webgpu'], graphOptimizationLevel: 'disabled' };
-    try {
-      const externalDataUrl = modelUrl + '_data';
-      const head = await fetch(externalDataUrl, { method: 'HEAD' });
-      if (head.ok) opts.externalData = [{ path: modelUrl.split('/').pop() + '_data', data: externalDataUrl }];
-    } catch {}
+    for (const suffix of ['.data', '_data']) {
+      try {
+        const externalDataUrl = modelUrl + suffix;
+        const head = await fetch(externalDataUrl, { method: 'HEAD' });
+        // path must match the location string recorded inside the .onnx proto
+        if (head.ok) { opts.externalData = [{ path: modelUrl.split('/').pop() + suffix, data: externalDataUrl }]; break; }
+      } catch {}
+    }
     sess = await ort.InferenceSession.create(modelUrl, opts);
+    window.kohra = { get sess() { return sess; }, get tokenizer() { return tokenizer; }, ort, opts, modelUrl };
     status(`Ready — ${modelUrl} on WebGPU.`);
     $('go').disabled = false;
   } catch (e) {

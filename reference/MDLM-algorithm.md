@@ -120,6 +120,45 @@ UX note for the browser: histories (canvas snapshot per step) make a great
 - Cosmetic: outputs open with an empty Qwen3 `<think>\n\n</think>` block (template artifact) —
   strip in UI or pass `enable_thinking: false` if supported.
 
+## G1 browser run (2026-06-10, ~23:35) — FLAG PLANTED 🚩
+
+`web/index.html` + ORT-web 1.26.0 WebGPU + **fp32** export (`model_fp32_single.onnx`, 3GB
+consolidated external data): the math prompt → **identical text to the Python ONNX run**
+(deterministic argmax), arithmetically correct `\boxed{96}`. **119 tokens · 128 forwards ·
+18.3s · 6.5 tok/s** on this Mac. To our knowledge the first masked-diffusion LM generation
+in a browser.
+
+### WebGPU forensics (why G1 ships fp32, not fp16)
+
+| Config | Result |
+|---|---|
+| wasm EP + graph-opts disabled | ✅ sane logits (max 43.4; argmax `<think>` — correct) |
+| webgpu fp32 + opts disabled | ✅ sane logits, full generation verified |
+| webgpu fp16 (keep_io_types) + opts disabled or default | ❌ **all-zero logits, silent** |
+| webgpu fp16 pure-io (no boundary casts) | ❌ all-zero, silent |
+| webgpu fp16 on ORT-web dev build (1.26.0-dev.20260416) | ❌ all-zero, silent |
+| any EP at default opts in *native* ORT (Python CPU/wasm) | ❌ crash: `SimplifiedLayerNormFusion` GetIndexFromName |
+
+→ ORT-web's WebGPU **fp16 kernels silently zero out on this unfused graph**; fp32 kernels are
+fine; the graph itself is fine (wasm proves it). Console shows nothing but generic EP-assignment
+warnings — a textbook silent failure.
+
+**Fp16 fix candidates (next session):** run ORT's *offline* transformer-optimizer fusion on the
+fp32 graph first (fused contrib ops = what onnx-community builds ship, and those run fp16-on-WebGPU
+fine everywhere), then fp16-convert; or bisect the op that zeros via intermediate-output probes;
+or file/find the upstream ORT issue.
+
+### Browser-side gotchas (verified tonight)
+
+- Transformers.js does **not** fetch `chat_template.jinja` (transformers 4.57 stores the template
+  outside tokenizer_config.json) → `apply_chat_template` throws; hardcode ChatML construction.
+- Transformers.js@4 pulls its **own bundled ORT dev build** alongside an explicit onnxruntime-web
+  import — two runtimes on the page; harmless but mind the memory.
+- `OnnxModel.save_model_to_file` writes external data as `<name>.onnx.data` (dot suffix);
+  ORT-web's `externalData.path` must match the location string inside the proto exactly.
+- fp32 with per-tensor external files (legacy exporter default) is unusable over HTTP —
+  consolidate to a single `.data` (see `model_fp32_single` re-save in scripts notes).
+
 ## Perf model
 
 Cost ≈ `steps × full-forward(T)`. No KV cache to win back; WebGPU batch throughput is the
