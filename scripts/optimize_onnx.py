@@ -24,13 +24,18 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 
-OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "models", "qwen3-0.6b-mdlm-onnx")
-FP32 = os.path.join(OUT_DIR, "model_fp32.onnx")
+# Env-overridable so this same fuse+RTN-q4 pipeline runs for Dream-7B on the Studio:
+#   KOHRA_MODEL_DIR=models/dream-7b-onnx KOHRA_FP32=model_fp16.onnx \
+#   KOHRA_NUM_HEADS=28 KOHRA_HIDDEN=3584 .venv/bin/python scripts/optimize_onnx.py --q4
+OUT_DIR = os.path.join(os.path.dirname(__file__), "..",
+                       os.environ.get("KOHRA_MODEL_DIR", "models/qwen3-0.6b-mdlm-onnx"))
+FP32 = os.path.join(OUT_DIR, os.environ.get("KOHRA_FP32", "model_fp32.onnx"))
 MASK_ID = 151669
 
 # Qwen3-0.6B (this checkpoint): hidden 1024, 16 query heads (head_dim 128), 8 KV heads.
-NUM_HEADS = 16
-HIDDEN = 1024
+# Override via env for other models (Dream-7B: KOHRA_NUM_HEADS=28 KOHRA_HIDDEN=3584).
+NUM_HEADS = int(os.environ.get("KOHRA_NUM_HEADS", "16"))
+HIDDEN = int(os.environ.get("KOHRA_HIDDEN", "1024"))
 
 CONTRIB_OPS = {
     "SimplifiedLayerNormalization",
