@@ -4,6 +4,9 @@
 
 कोहरा — *fog*. Diffusion generation starts as noise and denoises, pass by pass, into clear text.
 
+<!-- Capture a 12–18s denoise clip of the live demo, derive kohra-demo.gif (≤5MB), and commit it next to this README. See the ffmpeg recipe in the repo notes. -->
+![Kohra denoising text in the browser](kohra-demo.gif)
+
 **[Try it live](https://naklitechie.github.io/kohra)** (needs a WebGPU browser; first load pulls ~1.4GB) · also on [Hugging Face Spaces](https://huggingface.co/spaces/naklitechie/kohra) · model: [naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX)
 
 ## Why
