@@ -11,7 +11,23 @@
   main { max-width: 880px; margin: 0 auto; padding: 24px 16px 80px; }
   h1 { font-size: 18px; font-weight: 600; }
   h1 small { color: var(--dim); font-weight: 400; }
-  #status { color: var(--dim); min-height: 1.5em; white-space: pre-wrap; }
+  /* discreet loader: a small status pill with a spinner (loading/ready/error) */
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 4px 11px; border-radius: 999px;
+    font-size: 12px; border: 1px solid transparent;
+    transition: background .4s, border-color .4s, color .4s;
+  }
+  .status-badge.loading { background: rgba(122,162,247,.12); border-color: rgba(122,162,247,.35); color: var(--acc); }
+  .status-badge.ready   { background: rgba(158,206,106,.12); border-color: rgba(158,206,106,.35); color: var(--fresh); }
+  .status-badge.error   { background: rgba(247,118,142,.12); border-color: rgba(247,118,142,.4);  color: #f7768e; }
+  .spinner {
+    width: 10px; height: 10px; flex: none;
+    border: 2px solid currentColor; border-top-color: transparent;
+    border-radius: 50%; animation: spin .75s linear infinite;
+  }
+  .status-badge:not(.loading) .spinner { display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   textarea { width:100%; background:#1b1e25; color:var(--fg); border:1px solid #2a2e37; border-radius:8px; padding:10px; font:inherit; min-height:64px; }
   .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:10px 0; }
   label { color:var(--dim); font-size:13px; }
@@ -22,12 +38,23 @@
   .tok-mask { color:var(--mask); }
   .tok-fresh { color:var(--fresh); }
   #perf { color:var(--dim); font-size:13px; margin-top:8px; }
+  /* bottom pill: repo + portfolio links (LocalMind-style, centered, fixed) */
+  .footer-nav {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 20px; white-space: nowrap;
+    background: rgba(27,30,37,.9); border: 1px solid #2a2e37;
+    padding: 6px 16px; border-radius: 999px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.35); backdrop-filter: blur(6px);
+    font-size: 12px;
+  }
+  .footer-nav a { color: var(--acc); text-decoration: none; transition: opacity .2s; }
+  .footer-nav a:hover { opacity: .65; }
 </style>
 </head>
 <body>
 <main>
   <h1>kohra <small>— masked-diffusion text generation, fully in your browser (WebGPU)</small></h1>
-  <p id="status">Loading…</p>
+  <p><span id="status" class="status-badge loading"><span class="spinner"></span><span id="statusText">Loading…</span></span></p>
   <textarea id="prompt">Lily runs 12 km/h for 4 hours. How far in 8 hours?</textarea>
   <div class="row">
     <label>new tokens <input id="maxNew" type="number" value="128" step="32" min="16"></label>
@@ -39,6 +66,12 @@
   <div id="canvas"></div>
   <div id="perf"></div>
 </main>
+
+<!-- bottom pill: portfolio + source -->
+<div class="footer-nav">
+  <a href="https://naklitechie.github.io/" target="_blank" rel="noopener">&#11013; More Projects</a>
+  <a href="https://github.com/NakliTechie/kohra" target="_blank" rel="noopener">&#9000; Source</a>
+</div>
 
 <script type="module">
 // Thin DOM harness over the kohra.js library — all the diffusion logic lives there.
@@ -52,7 +85,11 @@ import { DiffusionLM } from './kohra.js';
 const HF = 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main';
 const TOKENIZER_ID = 'naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX';
 const $ = (id) => document.getElementById(id);
-const status = (t) => { $('status').textContent = t; };
+// state: 'loading' (spinner) | 'ready' | 'error'
+const status = (t, state = 'loading') => {
+  $('statusText').textContent = t;
+  $('status').className = 'status-badge ' + state;
+};
 
 const params = new URLSearchParams(location.search);
 const modelUrl = params.get('model') ?? `${HF}/onnx/model_fp16_fused.onnx`;
@@ -90,10 +127,10 @@ async function generate() {
     $('canvas').textContent = out.text;
     $('perf').textContent =
       `${out.tokens} tokens · ${out.forwards} forwards · ${out.seconds.toFixed(1)}s · ${out.tokensPerSecond.toFixed(1)} tok/s`;
-    status('Done.');
+    status('Done.', 'ready');
   } catch (e) {
     console.error(e);
-    status('Generation failed: ' + e.message);
+    status('Generation failed: ' + e.message, 'error');
   } finally {
     $('go').disabled = false;
   }
@@ -101,20 +138,20 @@ async function generate() {
 
 async function init() {
   try {
-    if (!navigator.gpu) { status('This demo needs WebGPU — try Chrome/Edge 121+.'); return; }
+    if (!navigator.gpu) { status('This demo needs WebGPU — try Chrome/Edge 121+.', 'error'); return; }
     status('Loading model… first run downloads ~1.4GB + compiles WebGPU shaders (cached after).');
     lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: TOKENIZER_ID });
     window.kohra = lm; // handy for the console / preview probing
-    status('Ready — fused fp16 Qwen3-0.6B-MDLM on WebGPU. Press Generate.');
+    status('Ready — fused fp16 Qwen3-0.6B-MDLM on WebGPU. Press Generate.', 'ready');
     $('go').disabled = false;
   } catch (e) {
     console.error(e);
-    status('FAILED: ' + e.message);
+    status('FAILED: ' + e.message, 'error');
   }
 }
 
-addEventListener('error', e => status('Uncaught: ' + (e.error?.message ?? e.message)));
-addEventListener('unhandledrejection', e => status('Rejection: ' + (e.reason?.message ?? e.reason)));
+addEventListener('error', e => status('Uncaught: ' + (e.error?.message ?? e.message), 'error'));
+addEventListener('unhandledrejection', e => status('Rejection: ' + (e.reason?.message ?? e.reason), 'error'));
 $('go').addEventListener('click', generate);
 init();
 </script>
