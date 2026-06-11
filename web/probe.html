@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kohra fp16 probe</title>
+<style>
+  body { background:#14161a; color:#e8e6e3; font:14px/1.5 ui-monospace, Menlo, monospace; margin:24px; }
+  pre { background:#1b1e25; border:1px solid #2a2e37; border-radius:8px; padding:14px; white-space:pre-wrap; }
+  .ok { color:#9ece6a; } .bad { color:#f7768e; } .dim { color:#8a8f98; }
+</style>
+</head>
+<body>
+<h3>kohra fp16 probe <span class="dim">— one fixed forward, WebGPU, opts disabled</span></h3>
+<pre id="out">idle. call window.probe('<model-url>') or pass ?model=...</pre>
+
+<script type="module">
+import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/ort.webgpu.min.mjs';
+const out = document.getElementById('out');
+const log = (s, cls) => { out.innerHTML += `\n${cls ? `<span class="${cls}">${s}</span>` : s}`; };
+
+// Diagnostics for one model: load on WebGPU (opts disabled), run the fixed probe
+// input, compare argmax at masked positions vs the Python fp32 ground truth.
+window.probe = async function (modelUrl) {
+  out.textContent = `probing ${modelUrl}`;
+  const result = { modelUrl, ok: false };
+  try {
+    const ref = await (await fetch('./probe_input.json')).json();
+    const T = ref.input_ids.length;
+
+    // ?opt= lets us test whether MatMulNBits needs ORT's layout passes (default
+    // 'disabled' is required by the fp16 SimplifiedLayerNorm casts; q4 may differ).
+    const optLevel = new URLSearchParams(location.search).get('opt') || 'disabled';
+    const opts = { executionProviders: ['webgpu'], graphOptimizationLevel: optLevel };
+    log(`graphOptimizationLevel: ${optLevel}`, 'dim');
+    for (const suffix of ['.data', '_data']) {
+      try {
+        const u = modelUrl + suffix;
+        if ((await fetch(u, { method: 'HEAD' })).ok) {
+          opts.externalData = [{ path: modelUrl.split('/').pop() + suffix, data: u }]; break;
+        }
+      } catch {}
+    }
+    const t0 = performance.now();
+    const sess = await ort.InferenceSession.create(modelUrl, opts);
+    log(`session created in ${((performance.now() - t0) / 1000).toFixed(1)}s`, 'dim');
+
+    const input_ids = new BigInt64Array(ref.input_ids.map(BigInt));
+    const t1 = performance.now();
+    const o = await sess.run({ input_ids: new ort.Tensor('int64', input_ids, [1, T]) });
+    const dt = performance.now() - t1;
+    const logits = o.logits.data; // Float32Array (ORT-web upcasts fp16 output)
+    const V = o.logits.dims[2];
+
+    // global stats
+    let maxAbs = 0, nan = 0, nz = 0;
+    for (let i = 0; i < logits.length; i++) {
+      const v = logits[i];
+      if (Number.isNaN(v)) nan++;
+      const a = Math.abs(v); if (a > maxAbs) maxAbs = a; if (a !== 0) nz++;
+    }
+    // argmax agreement at masked positions
+    let agree = 0;
+    const gotArg = [];
+    ref.masked_positions.forEach((p, idx) => {
+      const off = p * V; let best = 0, bestV = -Infinity;
+      for (let v = 0; v < V; v++) { const l = logits[off + v]; if (l > bestV) { bestV = l; best = v; } }
+      gotArg.push(best);
+      if (best === ref.expected_argmax[idx]) agree++;
+    });
+    const frac = agree / ref.masked_positions.length;
+
+    // "zeroed" (the WebGPU fp16 bug) is binary: maxAbs collapses to ~0. A working
+    // graph matches the fp32 logit magnitude (ref.max_abs). argmax agreement is a
+    // separate *quality* axis — honest fp16 flips a few near-ties, so >=0.85 is fine.
+    const zeroed = !(nan === 0 && maxAbs > ref.max_abs * 0.5);
+    Object.assign(result, {
+      ok: !zeroed && frac >= 0.85, zeroed,
+      forwardMs: Math.round(dt), maxAbs: +maxAbs.toFixed(2), nan,
+      nonzeroFrac: +(nz / logits.length).toFixed(4),
+      maskedArgmaxAgree: +frac.toFixed(4),
+      refMaxAbs: ref.max_abs, gotArg8: gotArg.slice(0, 8), expArg8: ref.expected_argmax.slice(0, 8),
+    });
+    log(`forward ${result.forwardMs}ms`, 'dim');
+    log(`maxAbs=${result.maxAbs} (ref ${ref.max_abs.toFixed(2)})  nan=${nan}  nonzero=${result.nonzeroFrac}`);
+    log(`computation: ${zeroed ? 'ZEROED ❌' : 'SANE (matches fp32 magnitude) ✅'}`, zeroed ? 'bad' : 'ok');
+    log(`masked argmax agree = ${result.maskedArgmaxAgree} (fp16 near-tie flips expected)`,
+        result.maskedArgmaxAgree >= 0.85 ? 'ok' : 'bad');
+    log(`got[:8] ${result.gotArg8}\nexp[:8] ${result.expArg8}`, 'dim');
+    log(result.ok ? 'VERDICT: PASS ✅' : 'VERDICT: FAIL ❌', result.ok ? 'ok' : 'bad');
+  } catch (e) {
+    result.error = String(e?.message ?? e);
+    log('ERROR: ' + result.error, 'bad');
+  }
+  window.__probeResult = result;
+  return result;
+};
+
+const m = new URLSearchParams(location.search).get('model');
+if (m) window.probe(m);
+</script>
+</body>
+</html>

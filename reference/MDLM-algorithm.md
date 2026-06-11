@@ -109,10 +109,10 @@ UX note for the browser: histories (canvas snapshot per step) make a great
 - **Gotcha:** ORT's `SimplifiedLayerNormFusion` crashes at session init on the converter's
   inserted casts → create sessions with graph optimizations **disabled** (Python:
   `ORT_DISABLE_ALL`; ORT-web: `graphOptimizationLevel: 'disabled'`).
-- **q4f16: DEFERRED.** MatMulNBits over the cast-littered fp16 graph only shrinks 1.5→1.3GB
-  and wrecks parity (masked-argmax 0.78 asym / 0.31 sym). Right recipe to try next:
-  quantize the *fp32* graph first, then fp16-convert the remainder; or reuse
-  onnx-community's conversion scripts; consider excluding `lm_head`.
+- **q4f16 (2026-06-11, G1d):** the right recipe was found (`scripts/optimize_onnx.py --q4`:
+  MatMulNBits on the *fused fp32* graph, all 197 weight-MatMuls incl `lm_head`, → fp16-convert).
+  **CPU parity is now good: masked-argmax 0.97 asym / 0.81 sym, 689MB** (4.4× smaller than fp32,
+  half of fp16). But it **does not run on WebGPU** — see the MatMulNBits forensics below. Parked.
 - **Full-generation check (the real gate):** `scripts/sample_onnx.py` (numpy minimal loop,
   fp32 ONNX, CPU EP) on the math prompt → coherent AND arithmetically correct
   (`\boxed{96}`), 128 forwards in 24.9s (0.19 s/forward — ORT CPU fp32 is ~13× faster than
@@ -143,10 +143,61 @@ in a browser.
 fine; the graph itself is fine (wasm proves it). Console shows nothing but generic EP-assignment
 warnings — a textbook silent failure.
 
-**Fp16 fix candidates (next session):** run ORT's *offline* transformer-optimizer fusion on the
-fp32 graph first (fused contrib ops = what onnx-community builds ship, and those run fp16-on-WebGPU
-fine everywhere), then fp16-convert; or bisect the op that zeros via intermediate-output probes;
-or file/find the upstream ORT issue.
+### fp16 SOLVED (2026-06-11, G1d) — offline RMSNorm fusion
+
+**Root cause: decomposed RMSNorm overflows native fp16.** The eager export computes RMSNorm as
+`Pow(x,2) → ReduceMean → …`. CPU/wasm fp16 kernels accumulate in fp32 internally, so `x²` is safe;
+**WebGPU fp16 kernels are native fp16**, and hidden-state values squared exceed fp16's 65504 ceiling
+→ `inf` → `rsqrt(inf)=0` → the whole forward collapses to zero, no error. That's why wasm-fp16 ✅ but
+webgpu-fp16 ❌ on the *same* graph.
+
+**Fix: fuse before converting.** `scripts/optimize_onnx.py` runs ORT 1.26's transformer optimizer
+with **`model_type="qwen3"`** (`num_heads=16, hidden_size=1024, opt_level=0` = python fusions only,
+no C++ opt → no SimplifiedLayerNormFusion crash). Result on the fp32 graph: 7301→4503 nodes, with
+**57 `SimplifiedLayerNormalization` + 56 `SkipSimplifiedLayerNormalization` + 56 `RotaryEmbedding`**
+contrib ops; all `Pow/ReduceMean/Sqrt` gone; parity **exact** (argmax 1.0000). The contrib LayerNorm
+ops reduce in fp32 internally, so fp16-converting the fused graph no longer overflows.
+
+| Config | Result |
+|---|---|
+| fused fp32 (`model_fp32_fused.onnx`, 2.9GB) | ✅ exact parity (argmax 1.0000) |
+| **fused fp16** (`model_fp16_fused.onnx`, 1.4GB) CPU | ✅ max\|Δ\|=0.059, masked-argmax **1.0000** |
+| **fused fp16 on WebGPU** | ✅ **non-zero, sane** — maxAbs 19.53 (ref 19.50), nan 0, masked-argmax 0.92 (fp16 near-tie flips) |
+| fused fp16 full generation on WebGPU | ✅ coherent CoT, **124 tok · 128 fwd · 12.5s · 9.9 tok/s** (vs fp32 6.5 tok/s) |
+
+**G1d fp16 outcome: ~1.5× faster (9.9 vs 6.5 tok/s), half the memory (1.4GB vs 3GB), coherent output.**
+fp16 argmax flips a few per-step near-ties vs fp32, so the generation *trajectory* differs (this run:
+`\boxed{384}`, a different-but-fluent path; fp32 got `\boxed{96}`) — within the G1 quality bar
+(fluent formatted instruct-following; arithmetic not the bar at 0.6B). Probe: `web/probe.html` +
+`scripts/probe_reference.py` (one fixed forward, reports zeroed-vs-sane + masked-argmax agreement).
+Sessions still need `graphOptimizationLevel: 'disabled'` (the fp16 boundary casts still trip the
+runtime fusion).
+
+### q4f16 — quantization recipe SOLVED, WebGPU MatMulNBits BLOCKED (2026-06-11, G1d)
+
+The old q4 dead end (cast-littered fp16 graph, most MatMuls skipped) is fixed by quantizing the
+**fused fp32** graph: all 197 weight-MatMuls become `MatMulNBits`, **CPU masked-argmax 0.97 (asym) /
+0.81 (sym)**, 689MB. But every q4 variant computes **wrong-but-sane-magnitude logits on WebGPU** while
+CPU decodes the identical file correctly. Isolation is airtight: fp16 and q4 share the same fused
+graph + same fp16 embedding; the *only* delta is the `MatMulNBits` ops, and fp16 is perfect → the
+fault is the **ORT-web 1.26.0 WebGPU MatMulNBits kernel on this Apple GPU**, not our recipe.
+
+| q4 config | CPU masked | WebGPU masked | note |
+|---|---|---|---|
+| asym, fp16 scales | 0.97 | 0.12 | `got[:8]` identical to fp32-scales run |
+| sym, fp16 scales | 0.81 | 0.00 | |
+| sym, `opt='all'` | 0.81 | 0.00 | opt level irrelevant (faster fwd, same garbage) |
+| asym, quantized from fp16 graph | 0.97 | 0.12 | recipe order irrelevant |
+| asym, **fp32 scales** (no fp16-convert) | 0.97 | 0.21 | scale dtype irrelevant |
+| asym, **accuracy_level=4** (int8 path) | 0.97 | 0.12 | kernel-path knob irrelevant |
+
+Ruled out: sym/asym · graph-opt level · quantize-fp32-then-fp16 vs quantize-fp16 · fp16-vs-fp32 scales ·
+fp16-vs-fp32 activations · accuracy_level. WebGPU output is **deterministic** (byte-identical argmax
+across scale-dtype variants) → a weight-decode/layout mismatch in the kernel, almost certainly the
+known Metal/Apple-GPU `MatMulNBits` correctness issue. **Next:** verify an onnx-community q4 model
+*also* miscomputes on this exact ORT-web+GPU (confirms platform, not our export) → file/find the
+upstream issue; or try a newer ORT-web; or block_size sweep (64/128) as a long shot. q4 artifacts kept
+locally: `model_q4f16_fused_asym.onnx` (689MB, the CPU-good reference for when WebGPU is fixed).
 
 ### Browser-side gotchas (verified tonight)
 

@@ -41,7 +41,7 @@
 
 <script type="module">
 // G1 harness: serve this folder + ../models over http (python3 -m http.server),
-// open with ?model=../models/qwen3-0.6b-mdlm-onnx/model_fp16.onnx
+// override the model with ?model=../models/qwen3-0.6b-mdlm-onnx/<file>.onnx
 import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/ort.webgpu.min.mjs';
 import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm';
 
@@ -51,7 +51,9 @@ const $ = (id) => document.getElementById(id);
 const status = (t) => { $('status').textContent = t; };
 
 const params = new URLSearchParams(location.search);
-const modelUrl = params.get('model') ?? '../models/qwen3-0.6b-mdlm-onnx/model_fp16.onnx';
+// fused fp16 (G1d): RMSNorm fused to SimplifiedLayerNormalization so WebGPU's native
+// fp16 kernels don't overflow the decomposed Pow(x,2) -> all-zero. 1.4GB, ~9.9 tok/s.
+const modelUrl = params.get('model') ?? '../models/qwen3-0.6b-mdlm-onnx/model_fp16_fused.onnx';
 
 let sess, tokenizer;
 

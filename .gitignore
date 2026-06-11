@@ -1,6 +1,9 @@
 # Local working notes — never committed
 plan/
 
+# Machine-local launch config (absolute paths) — never committed
+.claude/
+
 # External reference clones — never committed
 vendor/
 
