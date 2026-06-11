@@ -79,7 +79,8 @@ export class DiffusionLM {
   static async from_pretrained({
     model,
     tokenizer,
-    ort = ortDefault,
+    ort,                       // explicit onnxruntime-web instance (optional)
+    ortVersion,                // …or an npm version string to dynamic-import (optional)
     executionProviders = ['webgpu'],
     // The fused-fp16 graph keeps boundary casts that trip ORT-web's runtime
     // SimplifiedLayerNormFusion, so default to disabled (see reference doc).
@@ -88,6 +89,9 @@ export class DiffusionLM {
     eosId = EOS_ID,
   } = {}) {
     if (!model) throw new Error('kohra: `model` URL is required');
+    if (!ort) ort = ortVersion
+      ? await import(`https://cdn.jsdelivr.net/npm/onnxruntime-web@${ortVersion}/dist/ort.webgpu.min.mjs`)
+      : ortDefault;
     const tk = await AutoTokenizer.from_pretrained(tokenizer ?? model);
 
     const opts = { executionProviders, graphOptimizationLevel };

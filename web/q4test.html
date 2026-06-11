@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kohra q4/WebGPU diagnostic</title>
+<style>
+  body { background:#14161a; color:#e8e6e3; font:14px/1.6 ui-monospace, Menlo, monospace; margin:24px; max-width:820px; }
+  pre { background:#1b1e25; border:1px solid #2a2e37; border-radius:8px; padding:14px; white-space:pre-wrap; word-break:break-word; }
+  .ok { color:#9ece6a; } .bad { color:#f7768e; } .dim { color:#8a8f98; }
+</style>
+</head>
+<body>
+<h3>q4 / WebGPU diagnostic <span class="dim">— does onnx-community q4f16 run correctly here?</span></h3>
+<pre id="out">starting…</pre>
+
+<script type="module">
+// Decisive test: run a KNOWN-GOOD onnx-community q4f16 model on WebGPU via transformers.js
+// (which bundles its own ORT-web + MatMulNBits path). If output is coherent, dense 4-bit
+// MatMulNBits works on THIS GPU — so our q4 diffusion export (CPU-correct, WebGPU-wrong) has
+// a fixable bug, not a platform wall. Same Qwen3-0.6B arch as our model = apples-to-apples.
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm';
+
+const out = document.getElementById('out');
+const log = (s, cls) => { out.innerHTML += `\n${cls ? `<span class="${cls}">${s}</span>` : s}`; };
+
+const p = new URLSearchParams(location.search);
+const MODEL = p.get('model') ?? 'onnx-community/Qwen3-0.6B-ONNX';
+const DTYPE = p.get('dtype') ?? 'q4f16';
+const PROMPT = p.get('prompt') ?? 'The capital of France is';
+
+// crude coherence check: real words, not the same token repeated / empty / mojibake
+function looksCoherent(text) {
+  const t = (text || '').trim();
+  if (t.length < 8) return false;
+  const words = t.split(/\s+/);
+  const uniq = new Set(words.map(w => w.toLowerCase()));
+  const repeatRatio = uniq.size / Math.max(words.length, 1);
+  const printable = (t.match(/[\x20-\x7e]/g) || []).length / t.length;
+  return repeatRatio > 0.4 && printable > 0.9;
+}
+
+(async () => {
+  const result = { model: MODEL, dtype: DTYPE };
+  try {
+    out.textContent = `model: ${MODEL}\ndtype: ${DTYPE}\nwebgpu: ${!!navigator.gpu}`;
+    if (!navigator.gpu) { log('No WebGPU in this browser.', 'bad'); return; }
+
+    const t0 = performance.now();
+    const gen = await pipeline('text-generation', MODEL, {
+      device: 'webgpu', dtype: DTYPE,
+      progress_callback: (x) => {
+        if (x.status === 'progress' && x.file?.includes('.onnx'))
+          out.querySelector ? null : null; // (kept quiet; HF caches after first load)
+      },
+    });
+    log(`loaded in ${((performance.now() - t0) / 1000).toFixed(1)}s`, 'dim');
+
+    const t1 = performance.now();
+    const res = await gen(PROMPT, { max_new_tokens: 32, do_sample: false });
+    const dt = performance.now() - t1;
+    const text = Array.isArray(res) ? res[0].generated_text : res.generated_text;
+    const completion = typeof text === 'string' ? text.slice(PROMPT.length) : JSON.stringify(text);
+
+    const coherent = looksCoherent(completion);
+    Object.assign(result, { coherent, genMs: Math.round(dt), completion });
+    log(`\nprompt: ${PROMPT}`, 'dim');
+    log(`output: ${text}`);
+    log(`\ngen ${result.genMs}ms`, 'dim');
+    log(coherent
+      ? 'VERDICT: q4 WebGPU WORKS here ✅  → our diffusion q4 export is the fixable part'
+      : 'VERDICT: q4 WebGPU BROKEN here ❌  → platform/ORT-web issue (try newer build)',
+      coherent ? 'ok' : 'bad');
+  } catch (e) {
+    result.error = String(e?.message ?? e);
+    log('ERROR: ' + result.error, 'bad');
+  }
+  window.__q4result = result;
+})();
+</script>
+</body>
+</html>

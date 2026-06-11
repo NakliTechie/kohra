@@ -199,6 +199,48 @@ known Metal/Apple-GPU `MatMulNBits` correctness issue. **Next:** verify an onnx-
 upstream issue; or try a newer ORT-web; or block_size sweep (64/128) as a long shot. q4 artifacts kept
 locally: `model_q4f16_fused_asym.onnx` (689MB, the CPU-good reference for when WebGPU is fixed).
 
+#### UPDATE (2026-06-11, later) — NOT a platform/Apple-GPU bug; it's our quantizer's weight layout
+
+Ran the decisive control: **onnx-community/Qwen3-0.6B-ONNX q4f16 (same architecture) generates
+perfectly on this exact GPU** via transformers.js (`web/q4test.html`) — *"The capital of France is
+Paris, and the capital of Italy is Rome…"*. So WebGPU `MatMulNBits` **works here**; the earlier
+"Apple-GPU kernel bug" guess was wrong. The fault is in **what our `onnxruntime 1.26.0`
+`MatMulNBitsQuantizer` emits** — CPU decodes it fine, ORT-web's WebGPU kernel doesn't.
+
+Diffed our q4 node vs onnx-community's: identical attrs (`K,N,bits=4,block_size=32`). onnx-community is
+3-input symmetric (no zero_points), opset 14, heavily fused (611 nodes); ours can be made 3-input
+symmetric too (opset 17, 4503 nodes). Further ruled out (all still wrong-argmax on WebGPU):
+- our q4 under **transformers.js's own ORT build** (`1.26.0-dev.20260416`) — sym AND asym, opt disabled AND all
+- **unfused** vanilla-Qwen3 q4 (no SimplifiedLayerNorm fusion, fp32 activations) — also fails
+
+→ So it's neither our fusion, nor sym/asym, nor ORT version, nor opt level, nor zero-points. The
+remaining delta is the **packed-weight bytes** our quantizer writes (CPU-valid, WebGPU-incompatible)
+vs onnx-community's. **Real unblock = replicate onnx-community's quantization toolchain** (likely a
+different onnxruntime / `onnxruntime-genai` model-builder version, or optimum's quantizer — inspect
+transformers.js `scripts/convert.py` + its pinned ORT version). This **also gates Dream-7B / any 7B**
+(can't fp16 a 7B in-browser; q4 is mandatory and currently mis-packs). Diagnostic harness:
+`web/q4test.html` (transformers.js q4 on WebGPU), `web/probe.html?ort=<ver>&opt=<lvl>` (our files).
+
+#### q4 SOLVED (2026-06-11) — it's the quantizer ALGO_CONFIG (RTN), not the packing class
+
+onnx-community's model `producer_name` = **`onnxruntime-genai`**; ours = `onnxruntime.transformers`.
+Both call the same `MatMulNBitsQuantizer`, but genai passes **`RTNWeightOnlyQuantConfig`** (RTN via
+`neural_compressor`), while we used **`DefaultWeightOnlyQuantConfig`**. That one change is the fix:
+
+| quantizer config | CPU masked | WebGPU masked | generation |
+|---|---|---|---|
+| `DefaultWeightOnlyQuantConfig` (sym/asym) | 0.81–0.97 | 0.00–0.17 | garbage |
+| **`RTNWeightOnlyQuantConfig`** (sym, QOperator) | — | **0.50** (synthetic probe) | **✅ coherent** |
+
+The synthetic probe (random-token input) understates it badly — **real generation is fully coherent**:
+`model_q4f16_rtn_sym.onnx` (689MB) → *"…12 × 4 = 48 km … 48 × 8 = 384 km … \boxed{384}…"*, same quality
+as fp16. Recipe (`scripts/optimize_onnx.py --q4`): fuse fp32 → `MatMulNBitsQuantizer(block_size=32,
+is_symmetric=True, quant_format=QOperator, algo_config=RTNWeightOnlyQuantConfig())` → fp16-convert.
+Runs on **ORT-web ≥ 1.26.0-dev.20260416** (transformers.js's bundled build; pass via
+`DiffusionLM.from_pretrained({ortVersion})`). **Caveat: slower than fp16 at 0.6B** (q4 3.2 vs fp16
+9.8 tok/s — dequant overhead dominates on a small, non-memory-bound model). So **fp16 stays the 0.6B
+default; q4 is the path for models too big for fp16 (Dream-7B etc.).** This unblocks the 7B tier.
+
 ### Browser-side gotchas (verified tonight)
 
 - Transformers.js does **not** fetch `chat_template.jinja` (transformers 4.57 stores the template

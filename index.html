@@ -93,6 +93,9 @@ const status = (t, state = 'loading') => {
 
 const params = new URLSearchParams(location.search);
 const modelUrl = params.get('model') ?? `${HF}/onnx/model_fp16_fused.onnx`;
+// optional overrides for q4/ORT experiments; defaults keep the shipped demo unchanged
+const ortVersion = params.get('ort') || undefined;
+const graphOptimizationLevel = params.get('opt') || 'disabled';
 
 let lm;
 
@@ -140,7 +143,7 @@ async function init() {
   try {
     if (!navigator.gpu) { status('This demo needs WebGPU — try Chrome/Edge 121+.', 'error'); return; }
     status('Loading model… first run downloads ~1.4GB + compiles WebGPU shaders (cached after).');
-    lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: TOKENIZER_ID });
+    lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: TOKENIZER_ID, ortVersion, graphOptimizationLevel });
     window.kohra = lm; // handy for the console / preview probing
     status('Ready — fused fp16 Qwen3-0.6B-MDLM on WebGPU. Press Generate.', 'ready');
     $('go').disabled = false;

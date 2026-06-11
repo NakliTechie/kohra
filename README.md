@@ -8,7 +8,7 @@
 
 ## Why
 
-Google's DiffusionGemma announcement (2026-06) put text diffusion on the map: instead of token-by-token autoregression, the model generates whole blocks in parallel via iterative denoising — up to 4× faster on GPUs (1000+ tok/s on an H100). But the release is a 26B-A4B MoE with no ONNX export, and **no browser runtime anywhere supports a diffusion generation loop** — Transformers.js, onnxruntime-web, and MLC/WebLLM are all autoregressive-only.
+Google's [DiffusionGemma](https://huggingface.co/google/diffusiongemma-26B-A4B-it) (weights launched 2026-06-10, Apache 2.0) put text diffusion on the map: instead of token-by-token autoregression, the model generates whole 256-token blocks in parallel via iterative denoising (~48 steps) — up to 4× faster on GPUs (1000+ tok/s on an H100). But it's a 26B-A4B MoE (~18 GB quantized — past browser physics), and **no browser runtime anywhere supports a diffusion generation loop** — Transformers.js, onnxruntime-web, and MLC/WebLLM are all autoregressive-only.
 
 The irony: parallel block-denoising plays to WebGPU batch throughput *exactly* where sequential AR decode is the browser's bottleneck. Diffusion should eventually be a better fit for in-browser inference than AR is. kohra builds the missing stack.
 
@@ -108,7 +108,7 @@ reference harness built entirely on this API (it's the live demo).
 - **G2 — sampler quality + perf.** Confidence-threshold decoding (Fast-dLLM), step/block schedules. Benchmark AR Qwen3-0.6B vs diffusion Qwen3-0.6B **in the same browser** — same weight lineage, clean A/B of the two generation paradigms. This comparison is a publishable artifact on its own.
 - **G3 — a genuinely useful model.** [`inclusionAI/LLaDA-MoE-7B-A1B-Instruct`](https://huggingface.co/inclusionAI/LLaDA-MoE-7B-A1B-Instruct) (+ `-Instruct-TD`, trajectory-distilled for fewer denoise steps). First open MoE diffusion LM: 7B total / 1.4B active, quality ≈ Qwen2.5-3B-Instruct. Size class already proven in-browser by LFM2-8B-A1B.
 - **G4 — LocalMind integration** via its runtime-adapter `MODELS` pattern.
-- **North star — DiffusionGemma** (`google/diffusiongemma-26B-A4B-it`, Apache 2.0) when a small variant or community distillation appears. 26B total (~13–14GB q4) is past browser physics today. Desktop play is available anytime via mlx-community 4-bit on a big-RAM Mac.
+- **North star — DiffusionGemma** ([`google/diffusiongemma-26B-A4B-it`](https://huggingface.co/google/diffusiongemma-26B-A4B-it), Apache 2.0). **Weights launched 2026-06-10** (Gemma-4 backbone, 26B total / 3.8B active MoE, multimodal, 256K context; GGUF/MLX/vLLM out). 26B total (~18GB q4) is past browser physics — desktop play now actionable via MLX 4-bit on a big-RAM Mac. The browser angle is a future small/distilled diffusion-Gemma variant (watch [Gemma 4 E2B/E4B](https://huggingface.co/google/gemma-4-E2B) — those small sizes are AR today, but a diffusion variant at that scale would be the browser-feasible ambitious target).
 
 ## Reference code
 

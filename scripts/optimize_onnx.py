@@ -154,33 +154,41 @@ def main():
             MatMulNBitsQuantizer,
         )
 
-        print(f"\n== q4 quantize fused fp32 (symmetric={args.symmetric}, "
-              f"exclude_lm_head={args.exclude_lm_head}) ==")
+        # THE WEBGPU FIX (2026-06-11): use RTNWeightOnlyQuantConfig (the genai /
+        # neural_compressor RTN path), NOT DefaultWeightOnlyQuantConfig. Same MatMulNBits
+        # attrs, but the RTN path packs weights the way ORT-web's WebGPU kernel expects.
+        # DefaultWeightOnlyQuantConfig → CPU-correct but WebGPU garbage (masked 0.17);
+        # RTNWeightOnlyQuantConfig → coherent WebGPU generation. Symmetric + QOperator,
+        # matching onnx-community's producer (onnxruntime-genai). See reference doc.
+        from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
+        from onnxruntime.quantization import QuantFormat
+
+        print(f"\n== q4 quantize fused fp32 (RTN, symmetric, exclude_lm_head={args.exclude_lm_head}) ==")
         model = onnx.load(fused_path)
         exclude = []
         if args.exclude_lm_head:
             exclude = [n.name for n in model.graph.node
                        if n.op_type == "MatMul" and n.output and n.output[0] == "logits"
                        or n.name == "/model/lm_head/MatMul"]
-        cfg = DefaultWeightOnlyQuantConfig(block_size=32, is_symmetric=args.symmetric)
-        q = MatMulNBitsQuantizer(model, algo_config=cfg, nodes_to_exclude=exclude)
+        cfg = RTNWeightOnlyQuantConfig()
+        q = MatMulNBitsQuantizer(model, block_size=32, is_symmetric=True,
+                                 quant_format=QuantFormat.QOperator,
+                                 algo_config=cfg, nodes_to_exclude=exclude)
         q.process()
-        histogram(q.model.model, "q4 (fp32 scales)")
+        histogram(q.model.model, "q4 RTN (fp32 scales)")
 
         # fp16-convert the remainder: MatMulNBits packed weights are uint8 (untouched),
         # scales -> fp16, attention/elementwise -> fp16. This is q4f16 (onnx-community shape).
         qm = OnnxModel(q.model.model)
         qm.convert_float_to_float16(keep_io_types=True)
         histogram(qm.model, "q4f16")
-        # WebGPU's MatMulNBits kernel mishandles asymmetric zero-points (sane
-        # magnitude, wrong argmax — masked 0.97 on CPU but 0.17 on WebGPU). Symmetric
-        # is the WebGPU-safe path; tag the file so the two never get confused.
-        tag = "sym" if args.symmetric else "asym"
-        q4_path = os.path.join(OUT_DIR, f"model_q4f16_fused_{tag}.onnx")
+        q4_path = os.path.join(OUT_DIR, "model_q4f16_rtn_sym.onnx")  # the WebGPU-working q4
         qm.save_model_to_file(q4_path, use_external_data_format=True)
         sz = os.path.getsize(q4_path + ".data") / 1e6
         print(f"saved -> {q4_path} ({sz:.0f} MB data)")
-        parity(ref_sess, q4_path, "q4f16-fused", disable_opt=True)
+        parity(ref_sess, q4_path, "q4f16-rtn", disable_opt=True)
+        print("NOTE: run on WebGPU with ORT-web >= 1.26.0-dev.20260416 (transformers.js's build). "
+              "Synthetic-probe masked-argmax ~0.5 understates it; real generation is coherent.")
 
     if args.q4_fp32scales:
         # Diagnostic: 4-bit weights but KEEP fp32 scales + fp32 activations (no
