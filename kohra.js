@@ -32,6 +32,9 @@ const GEN_DEFAULTS = {
   blockSize: 32,
   temperature: 0,        // 0 => deterministic argmax (the verified path)
   remasking: 'low_confidence', // or 'random'
+  threshold: null,       // Fast-dLLM: if set (e.g. 0.9), unmask ALL block positions with
+                         // confidence >= threshold per step (min 1) instead of a fixed
+                         // count → fewer forwards when the model is confident. null = use `steps`.
   chatTemplate: true,    // wrap prompt in Qwen3 ChatML + generation prompt
   stripThink: false,     // drop a leading empty <think>…</think> block from the result
   onStep: null,          // ({ x, P, fresh, block, numBlocks, forward, elapsedMs }) => void
@@ -148,13 +151,23 @@ export class DiffusionLM {
     let forward = 0;
     const t0 = performance.now();
 
+    const inBlockMasked = (start, end) => {
+      let n = 0; for (let i = start; i < end; i++) if (x[i] === MASK) n++; return n;
+    };
+
     for (let b = 0; b < numBlocks; b++) {
       const start = P + b * cfg.blockSize;
       const end = Math.min(start + cfg.blockSize, T);
-      let nMasked = 0;
-      for (let i = start; i < end; i++) if (x[i] === MASK) nMasked++;
+      const nMasked = inBlockMasked(start, end);
+      if (nMasked === 0) continue;
 
-      for (const k of transferSchedule(nMasked, stepsPerBlock)) {
+      // Fixed-steps mode precomputes per-step reveal counts; threshold (Fast-dLLM) mode
+      // loops until the block is clear, revealing however many clear the bar each step.
+      const schedule = cfg.threshold == null ? transferSchedule(nMasked, stepsPerBlock) : null;
+      let step = 0;
+
+      while (inBlockMasked(start, end) > 0) {
+        if (schedule && step >= schedule.length) break;
         const out = await this.session.run({
           input_ids: new ort.Tensor('int64', x.slice(), [1, T]),
         });
@@ -162,9 +175,8 @@ export class DiffusionLM {
         const logits = out.logits.data;       // Float32Array, [T * V] (ORT upcasts fp16)
         const V = out.logits.dims[2];
 
-        // Score every masked position in the current block, then commit the top-k by
-        // confidence. temperature 0 = plain argmax; >0 = Gumbel-max (reference does this
-        // in f64; JS numbers are f64). Confidence is always softmax(logits)[token].
+        // Score every masked position in the current block. temperature 0 = plain argmax;
+        // >0 = Gumbel-max (f64). Confidence is always softmax(logits)[token].
         const cand = [];
         for (let p = start; p < end; p++) {
           if (x[p] !== MASK) continue;
@@ -186,9 +198,23 @@ export class DiffusionLM {
           cand.push({ p, tok: best, conf });
         }
 
-        cand.sort((a, b2) => b2.conf - a.conf);
+        // Pick which positions to commit this step.
+        let commit;
+        if (cfg.threshold == null) {
+          cand.sort((a, b2) => b2.conf - a.conf);
+          commit = cand.slice(0, schedule[step]);
+        } else {
+          commit = cand.filter((c) => c.conf >= cfg.threshold);
+          if (commit.length === 0) {        // guarantee progress: take the single best
+            let top = cand[0];
+            for (const c of cand) if (c.conf > top.conf) top = c;
+            commit = [top];
+          }
+        }
+        step++;
+
         const fresh = new Set();
-        for (const { p, tok } of cand.slice(0, k)) { x[p] = BigInt(tok); fresh.add(p); }
+        for (const { p, tok } of commit) { x[p] = BigInt(tok); fresh.add(p); }
 
         cfg.onStep?.({
           x, P, fresh, block: b, numBlocks, forward,

@@ -61,6 +61,7 @@
     <label>steps <input id="steps" type="number" value="128" step="16" min="4"></label>
     <label>block <input id="blockSize" type="number" value="32" step="8" min="8"></label>
     <label>temp <input id="temp" type="number" value="0" step="0.1" min="0"></label>
+    <label title="Fast-dLLM: unmask all tokens above this confidence per step (0 = off, use steps)">conf≥ <input id="threshold" type="number" value="0" step="0.05" min="0" max="1"></label>
     <button id="go" disabled>Generate</button>
   </div>
   <div id="canvas"></div>
@@ -121,6 +122,7 @@ async function generate() {
       steps: +$('steps').value,
       blockSize: +$('blockSize').value,
       temperature: +$('temp').value,
+      threshold: +$('threshold').value || null,   // Fast-dLLM confidence-threshold decoding
       stripThink: true,
       onStep: (s) => {
         renderCanvas(s);
