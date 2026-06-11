@@ -6,6 +6,7 @@ The fused-fp16 graph is the in-browser deliverable: it runs on WebGPU at ~9.8 to
 Usage:
   .venv/bin/python scripts/push_to_hf.py --stage meta     # repo + tokenizer + card + graph
   .venv/bin/python scripts/push_to_hf.py --stage weights  # the 1.4GB external-data blob
+  .venv/bin/python scripts/push_to_hf.py --stage space    # create the static demo Space
 """
 
 import argparse
@@ -15,7 +16,27 @@ import os
 from huggingface_hub import HfApi, upload_file
 
 REPO_ID = "naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX"
+SPACE_ID = "naklitechie/kohra"
 HERE = os.path.dirname(__file__)
+ROOT = os.path.join(HERE, "..")
+
+SPACE_README = """---
+title: kohra
+emoji: 🌫️
+colorFrom: indigo
+colorTo: gray
+sdk: static
+pinned: false
+license: apache-2.0
+short_description: Masked text-diffusion LM, fully in your browser (WebGPU)
+---
+
+# kohra — text diffusion in your browser
+
+A masked-diffusion language model (Qwen3-0.6B-MDLM) generating text **client-side** on WebGPU —
+no server inference. Open this Space in a WebGPU browser (Chrome/Edge 121+); first load pulls
+~1.4 GB (cached after). Source + the `kohra.js` loader: https://github.com/NakliTechie/kohra
+"""
 MODELS = os.path.join(HERE, "..", "models", "qwen3-0.6b-mdlm-onnx")
 GRAPH = os.path.join(MODELS, "model_fp16_fused.onnx")
 DATA = os.path.join(MODELS, "model_fp16_fused.onnx.data")
@@ -54,12 +75,12 @@ diffusion in-browser is common; text diffusion has been server-side until now).
 
 Generation is a JS denoising loop — start fully masked, run a full forward over the canvas, lock the
 highest-confidence tokens, repeat — implemented in **[kohra](https://github.com/NakliTechie/kohra)**
-(`web/kohra.js`), a small transformers.js-style module.
+(`kohra.js`), a small transformers.js-style module.
 
 ## Use it
 
 Grab the loader (`kohra.js`, one file — it's in this repo, or in the
-[kohra project](https://github.com/NakliTechie/kohra) at `web/kohra.js`) and import it locally;
+[kohra project](https://github.com/NakliTechie/kohra) at `kohra.js`) and import it locally;
 the model + tokenizer load from this HF repo:
 
 ```js
@@ -101,7 +122,7 @@ MDLM adaptation by [dLLM](https://github.com/ZHZisZZ/dllm)). See the source repo
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", choices=["meta", "weights"], required=True)
+    ap.add_argument("--stage", choices=["meta", "weights", "space"], required=True)
     args = ap.parse_args()
 
     api = HfApi()
@@ -130,7 +151,7 @@ def main():
         print("uploaded onnx/model_fp16_fused.onnx")
 
         # bundle the loader so the repo is self-contained (copy this file into your app)
-        kohra_js = os.path.join(HERE, "..", "web", "kohra.js")
+        kohra_js = os.path.join(HERE, "..", "kohra.js")
         upload_file(path_or_fileobj=kohra_js, path_in_repo="kohra.js",
                     repo_id=REPO_ID, commit_message="bundle the kohra.js loader")
         print("uploaded kohra.js")
@@ -143,6 +164,20 @@ def main():
                     repo_id=REPO_ID, commit_message="onnx external data (fused fp16)")
         print("WEIGHTS DONE")
         print(f"https://huggingface.co/{REPO_ID}")
+
+    elif args.stage == "space":
+        # Static demo Space. The GitHub Action keeps index.html + kohra.js in sync after this;
+        # we seed it here so the Space works immediately.
+        api.create_repo(SPACE_ID, repo_type="space", space_sdk="static",
+                        exist_ok=True, private=False)
+        print(f"space ready: {SPACE_ID}")
+        upload_file(path_or_fileobj=SPACE_README.encode(), path_in_repo="README.md",
+                    repo_id=SPACE_ID, repo_type="space", commit_message="space card")
+        for name in ("index.html", "kohra.js"):
+            upload_file(path_or_fileobj=os.path.join(ROOT, name), path_in_repo=name,
+                        repo_id=SPACE_ID, repo_type="space", commit_message=f"seed {name}")
+            print(f"uploaded {name}")
+        print(f"SPACE DONE — https://huggingface.co/spaces/{SPACE_ID}")
 
 
 if __name__ == "__main__":

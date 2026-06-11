@@ -1,8 +1,10 @@
 # kohra
 
-> Text-diffusion language models running in the browser — a JS denoising loop over ONNX Runtime Web / WebGPU. To our knowledge, nobody has shipped this yet.
+> Text-diffusion language models running in the browser — a JS denoising loop over ONNX Runtime Web / WebGPU. To our knowledge, the first in-browser *text*-diffusion generation.
 
 कोहरा — *fog*. Diffusion generation starts as noise and denoises, pass by pass, into clear text.
+
+**[Try it live](https://naklitechie.github.io/kohra)** (needs a WebGPU browser; first load pulls ~1.4GB) · also on [Hugging Face Spaces](https://huggingface.co/spaces/naklitechie/kohra) · model: [naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX)
 
 ## Why
 
@@ -19,7 +21,7 @@ Two missing pieces, built as one vertically-sliced project (they're only testabl
 
 ## Use it in a browser (G1, working today)
 
-`web/kohra.js` is a single-file, transformers.js-style ES module: import it, point it at an ONNX
+`kohra.js` is a single-file, transformers.js-style ES module: import it, point it at an ONNX
 graph, get masked-diffusion text generation on WebGPU. It self-loads onnxruntime-web (from a CDN)
 and the tokenizer (from Hugging Face), so there's no build step and no server-side inference.
 
@@ -32,7 +34,7 @@ The fp16 model is published at
 
 ```sh
 # from this repo
-cp web/kohra.js  your-app/kohra.js
+cp kohra.js  your-app/kohra.js
 # or grab it straight from the model repo
 curl -O https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main/kohra.js
 ```
@@ -88,8 +90,8 @@ const out = await lm.generate(prompt, {
 ```
 
 `x` is the full token canvas (masked positions are `lm.maskId`); `fresh` is the set of positions
-revealed this step — colour those to animate the fog lifting. `web/index.html` is a ~60-line
-reference harness built entirely on this API.
+revealed this step — colour those to animate the fog lifting. `index.html` is a ~60-line
+reference harness built entirely on this API (it's the live demo).
 
 ### Requirements & notes
 

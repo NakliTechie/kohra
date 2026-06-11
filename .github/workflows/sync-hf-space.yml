@@ -1,0 +1,27 @@
+name: Sync to Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+    paths: [index.html, kohra.js]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Push to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git clone https://NakliTechie:$HF_TOKEN@huggingface.co/spaces/naklitechie/kohra /tmp/hf-space
+          cp index.html kohra.js /tmp/hf-space/
+          cd /tmp/hf-space
+          git config user.email "chirag@naklitechie.com"
+          git config user.name "NakliTechie"
+          git add index.html kohra.js
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "Sync from GitHub $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push

@@ -42,18 +42,20 @@
 
 <script type="module">
 // Thin DOM harness over the kohra.js library — all the diffusion logic lives there.
-// Serve this folder + ../models over http; override the model with
-// ?model=../models/qwen3-0.6b-mdlm-onnx/<file>.onnx
+// Model + tokenizer load from Hugging Face by default, so this page works as-is on
+// GitHub Pages / a static HF Space. For local dev against a local export, override:
+//   ?model=models/qwen3-0.6b-mdlm-onnx/model_fp16_fused.onnx
 import { DiffusionLM } from './kohra.js';
 
-const MODEL_ID = 'dllm-hub/Qwen3-0.6B-diffusion-mdlm-v0.1';
+// fused fp16 (G1d): RMSNorm fused to SimplifiedLayerNormalization so WebGPU's native
+// fp16 kernels don't overflow the decomposed Pow(x,2) -> all-zero. ~1.4GB, ~9.8 tok/s.
+const HF = 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main';
+const TOKENIZER_ID = 'naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX';
 const $ = (id) => document.getElementById(id);
 const status = (t) => { $('status').textContent = t; };
 
 const params = new URLSearchParams(location.search);
-// fused fp16 (G1d): RMSNorm fused to SimplifiedLayerNormalization so WebGPU's native
-// fp16 kernels don't overflow the decomposed Pow(x,2) -> all-zero. 1.4GB, ~9.9 tok/s.
-const modelUrl = params.get('model') ?? '../models/qwen3-0.6b-mdlm-onnx/model_fp16_fused.onnx';
+const modelUrl = params.get('model') ?? `${HF}/onnx/model_fp16_fused.onnx`;
 
 let lm;
 
@@ -99,10 +101,11 @@ async function generate() {
 
 async function init() {
   try {
-    status('Loading model… (first time downloads + compiles shaders)');
-    lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: MODEL_ID });
+    if (!navigator.gpu) { status('This demo needs WebGPU — try Chrome/Edge 121+.'); return; }
+    status('Loading model… first run downloads ~1.4GB + compiles WebGPU shaders (cached after).');
+    lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: TOKENIZER_ID });
     window.kohra = lm; // handy for the console / preview probing
-    status(`Ready — ${modelUrl} on WebGPU.`);
+    status('Ready — fused fp16 Qwen3-0.6B-MDLM on WebGPU. Press Generate.');
     $('go').disabled = false;
   } catch (e) {
     console.error(e);
