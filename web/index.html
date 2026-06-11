@@ -33,6 +33,7 @@
     <label>new tokens <input id="maxNew" type="number" value="128" step="32" min="16"></label>
     <label>steps <input id="steps" type="number" value="128" step="16" min="4"></label>
     <label>block <input id="blockSize" type="number" value="32" step="8" min="8"></label>
+    <label>temp <input id="temp" type="number" value="0" step="0.1" min="0"></label>
     <button id="go" disabled>Generate</button>
   </div>
   <div id="canvas"></div>
@@ -40,13 +41,12 @@
 </main>
 
 <script type="module">
-// G1 harness: serve this folder + ../models over http (python3 -m http.server),
-// override the model with ?model=../models/qwen3-0.6b-mdlm-onnx/<file>.onnx
-import * as ort from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/ort.webgpu.min.mjs';
-import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm';
+// Thin DOM harness over the kohra.js library — all the diffusion logic lives there.
+// Serve this folder + ../models over http; override the model with
+// ?model=../models/qwen3-0.6b-mdlm-onnx/<file>.onnx
+import { DiffusionLM } from './kohra.js';
 
 const MODEL_ID = 'dllm-hub/Qwen3-0.6B-diffusion-mdlm-v0.1';
-const MASK_ID = 151669n, EOS_ID = 151645n;
 const $ = (id) => document.getElementById(id);
 const status = (t) => { $('status').textContent = t; };
 
@@ -55,25 +55,16 @@ const params = new URLSearchParams(location.search);
 // fp16 kernels don't overflow the decomposed Pow(x,2) -> all-zero. 1.4GB, ~9.9 tok/s.
 const modelUrl = params.get('model') ?? '../models/qwen3-0.6b-mdlm-onnx/model_fp16_fused.onnx';
 
-let sess, tokenizer;
+let lm;
 
-// per-block reveal counts — linear alpha scheduler, deterministic (mirrors scripts/sample_onnx.py)
-function transferSchedule(nMasked, steps) {
-  const ks = []; let remaining = nMasked;
-  for (let i = 0; i < steps && remaining > 0; i++) {
-    const k = Math.min(Math.round(remaining / (steps - i)), remaining);
-    if (k > 0) { ks.push(k); remaining -= k; }
-  }
-  return ks;
-}
-
-function renderCanvas(x, P, fresh) {
+// Visualize the "fog lifting": masked positions as ▒, freshly committed tokens in green.
+function renderCanvas({ x, P, fresh }) {
   const el = $('canvas'); el.textContent = '';
   for (let i = P; i < x.length; i++) {
     const span = document.createElement('span');
-    if (x[i] === MASK_ID) { span.className = 'tok-mask'; span.textContent = '▒'; }
+    if (x[i] === lm.maskId) { span.className = 'tok-mask'; span.textContent = '▒'; }
     else {
-      span.textContent = tokenizer.decode([Number(x[i])]);
+      span.textContent = lm.tokenizer.decode([Number(x[i])]);
       if (fresh.has(i)) span.className = 'tok-fresh';
     }
     el.appendChild(span);
@@ -82,83 +73,35 @@ function renderCanvas(x, P, fresh) {
 
 async function generate() {
   $('go').disabled = true;
-  const maxNew = +$('maxNew').value, steps = +$('steps').value, blockSize = +$('blockSize').value;
-  // transformers 4.57 ships the template as chat_template.jinja, which
-  // Transformers.js doesn't fetch — construct ChatML by hand (verified vs
-  // Python apply_chat_template, 28 tokens for the default prompt)
-  const promptText = `<|im_start|>user\n${$('prompt').value}<|im_end|>\n<|im_start|>assistant\n`;
-  const promptIds = [...tokenizer(promptText, { add_special_tokens: false }).input_ids.data].map(Number);
-
-  const P = promptIds.length, T = P + maxNew;
-  const x = new BigInt64Array(T).fill(EOS_ID);
-  promptIds.forEach((t, i) => { x[i] = BigInt(t); });
-  for (let i = P; i < T; i++) x[i] = MASK_ID;
-
-  const numBlocks = Math.ceil(maxNew / blockSize);
-  const stepsPerBlock = Math.ceil(steps / numBlocks);
-  let nForwards = 0; const t0 = performance.now();
-
-  for (let b = 0; b < numBlocks; b++) {
-    const start = P + b * blockSize, end = Math.min(start + blockSize, T);
-    let nMasked = 0;
-    for (let i = start; i < end; i++) if (x[i] === MASK_ID) nMasked++;
-
-    for (const k of transferSchedule(nMasked, stepsPerBlock)) {
-      const feeds = { input_ids: new ort.Tensor('int64', x.slice(), [1, T]) };
-      const out = await sess.run(feeds);
-      nForwards++;
-      const logits = out.logits.data; // Float32Array [T * V]
-      const V = out.logits.dims[2];
-
-      // candidates: masked positions inside current block
-      const cand = [];
-      for (let p = start; p < end; p++) {
-        if (x[p] !== MASK_ID) continue;
-        const off = p * V;
-        let best = 0, bestV = -Infinity, sumExp = 0, maxL = -Infinity;
-        for (let v = 0; v < V; v++) { const l = logits[off + v]; if (l > maxL) maxL = l; if (l > bestV) { bestV = l; best = v; } }
-        for (let v = 0; v < V; v++) sumExp += Math.exp(logits[off + v] - maxL);
-        cand.push({ p, tok: best, conf: Math.exp(bestV - maxL) / sumExp });
-      }
-      cand.sort((a, b2) => b2.conf - a.conf);
-      const fresh = new Set();
-      for (const { p, tok } of cand.slice(0, k)) { x[p] = BigInt(tok); fresh.add(p); }
-      renderCanvas(x, P, fresh);
-      status(`block ${b + 1}/${numBlocks} · forward ${nForwards} · ${((performance.now() - t0) / 1000).toFixed(1)}s`);
-      await new Promise(r => requestAnimationFrame(r));
-    }
+  try {
+    const out = await lm.generate($('prompt').value, {
+      maxNewTokens: +$('maxNew').value,
+      steps: +$('steps').value,
+      blockSize: +$('blockSize').value,
+      temperature: +$('temp').value,
+      stripThink: true,
+      onStep: (s) => {
+        renderCanvas(s);
+        status(`block ${s.block + 1}/${s.numBlocks} · forward ${s.forward} · ${(s.elapsedMs / 1000).toFixed(1)}s`);
+      },
+    });
+    $('canvas').textContent = out.text;
+    $('perf').textContent =
+      `${out.tokens} tokens · ${out.forwards} forwards · ${out.seconds.toFixed(1)}s · ${out.tokensPerSecond.toFixed(1)} tok/s`;
+    status('Done.');
+  } catch (e) {
+    console.error(e);
+    status('Generation failed: ' + e.message);
+  } finally {
+    $('go').disabled = false;
   }
-
-  const dt = (performance.now() - t0) / 1000;
-  // trim at first EOS after prompt and show final text
-  let genEnd = T;
-  for (let i = P; i < T; i++) if (x[i] === EOS_ID) { genEnd = i; break; }
-  const text = tokenizer.decode([...x.slice(P, genEnd)].map(Number), { skip_special_tokens: true });
-  $('canvas').textContent = text;
-  const tokS = (genEnd - P) / dt;
-  $('perf').textContent = `${genEnd - P} tokens · ${nForwards} forwards · ${dt.toFixed(1)}s · ${tokS.toFixed(1)} tok/s`;
-  status('Done.');
-  $('go').disabled = false;
 }
 
 async function init() {
   try {
-    status('Loading tokenizer…');
-    tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
     status('Loading model… (first time downloads + compiles shaders)');
-    // graphOptimizationLevel: ORT's SimplifiedLayerNormFusion crashes on the
-    // fp16-converter's inserted casts (see scripts/export_onnx.py parity note)
-    const opts = { executionProviders: ['webgpu'], graphOptimizationLevel: 'disabled' };
-    for (const suffix of ['.data', '_data']) {
-      try {
-        const externalDataUrl = modelUrl + suffix;
-        const head = await fetch(externalDataUrl, { method: 'HEAD' });
-        // path must match the location string recorded inside the .onnx proto
-        if (head.ok) { opts.externalData = [{ path: modelUrl.split('/').pop() + suffix, data: externalDataUrl }]; break; }
-      } catch {}
-    }
-    sess = await ort.InferenceSession.create(modelUrl, opts);
-    window.kohra = { get sess() { return sess; }, get tokenizer() { return tokenizer; }, ort, opts, modelUrl };
+    lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: MODEL_ID });
+    window.kohra = lm; // handy for the console / preview probing
     status(`Ready — ${modelUrl} on WebGPU.`);
     $('go').disabled = false;
   } catch (e) {
