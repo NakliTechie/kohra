@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kohra benchmark — AR vs diffusion, same browser</title>
+<style>
+  body { background:#14161a; color:#e8e6e3; font:14px/1.6 ui-monospace, Menlo, monospace; margin:24px; max-width:900px; }
+  h3 { font-weight:600; }
+  pre { background:#1b1e25; border:1px solid #2a2e37; border-radius:8px; padding:14px; white-space:pre-wrap; word-break:break-word; }
+  table { border-collapse:collapse; margin-top:12px; width:100%; }
+  th,td { border:1px solid #2a2e37; padding:6px 10px; text-align:right; font-size:13px; }
+  th:first-child,td:first-child { text-align:left; }
+  .dim { color:#8a8f98; } .ok { color:#9ece6a; }
+  button { background:#7aa2f7; color:#10131a; border:0; border-radius:8px; padding:8px 18px; font:inherit; font-weight:600; cursor:pointer; }
+</style>
+</head>
+<body>
+<h3>kohra benchmark <span class="dim">— autoregressive vs masked-diffusion, same Qwen3-0.6B, same browser/WebGPU</span></h3>
+<button id="go">Run benchmark</button>
+<pre id="log">Click Run. AR = onnx-community Qwen3-0.6B via transformers.js (fp16). Diffusion = kohra fused fp16, steps swept.</pre>
+<div id="table"></div>
+
+<script type="module">
+import { pipeline } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm';
+import { DiffusionLM } from '../kohra.js';   // kohra.js lives at repo root (served at /kohra.js)
+
+const $ = (id) => document.getElementById(id);
+const log = (s, cls) => { $('log').innerHTML += `\n${cls ? `<span class="${cls}">${s}</span>` : s}`; };
+
+const PROMPT = 'Lily runs 12 km/h for 4 hours. How far in 8 hours?';
+const MAX_NEW = 128;
+const AR_MODEL = 'onnx-community/Qwen3-0.6B-ONNX';
+const DIFF_MODEL = '../models/qwen3-0.6b-mdlm-onnx/model_fp16_fused.onnx';
+const TOKENIZER = 'dllm-hub/Qwen3-0.6B-diffusion-mdlm-v0.1';
+const rows = [];
+
+function chatml(text) { return `<|im_start|>user\n${text}<|im_end|>\n<|im_start|>assistant\n`; }
+
+async function benchAR() {
+  log('\n[AR] loading onnx-community Qwen3-0.6B (transformers.js, fp16, webgpu)…', 'dim');
+  const gen = await pipeline('text-generation', AR_MODEL, { device: 'webgpu', dtype: 'fp16' });
+  await gen('hi', { max_new_tokens: 4 });                       // warmup (shader compile)
+  let ttft = null; const t0 = performance.now();
+  const out = await gen(chatml(PROMPT), {
+    max_new_tokens: MAX_NEW, do_sample: false,
+    // first streamed chunk ≈ time-to-first-token
+    streamer: { put: () => { if (ttft === null) ttft = (performance.now() - t0) / 1000; }, end: () => {} },
+  });
+  const dt = (performance.now() - t0) / 1000;
+  const text = (Array.isArray(out) ? out[0].generated_text : out.generated_text) ?? '';
+  const completion = typeof text === 'string' ? text.slice(chatml(PROMPT).length) : '';
+  // count generated tokens via the model's own tokenizer
+  const n = gen.tokenizer(completion, { add_special_tokens: false }).input_ids.dims.at(-1) || MAX_NEW;
+  rows.push({ mode: 'AR (sequential + KV cache)', precision: 'fp16', tokens: n, forwards: n,
+              seconds: +dt.toFixed(1), tokS: +(n / dt).toFixed(1), ttft: +ttft?.toFixed(2), text: completion.trim() });
+  log(`[AR] ${n} tok · ${dt.toFixed(1)}s · ${(n / dt).toFixed(1)} tok/s · TTFT ${ttft?.toFixed(2)}s`, 'ok');
+  await gen.dispose?.();
+}
+
+async function benchDiffusion() {
+  log('\n[diffusion] loading kohra fused fp16…', 'dim');
+  const lm = await DiffusionLM.from_pretrained({ model: DIFF_MODEL, tokenizer: TOKENIZER });
+  for (const steps of [128, 64, 32]) {
+    const out = await lm.generate(PROMPT, { maxNewTokens: MAX_NEW, steps, blockSize: 32, stripThink: true });
+    rows.push({ mode: `diffusion (parallel, ${steps} steps)`, precision: 'fp16', tokens: out.tokens,
+                forwards: out.forwards, seconds: +out.seconds.toFixed(1), tokS: +out.tokensPerSecond.toFixed(1),
+                ttft: null, text: out.text });
+    log(`[diffusion ${steps}] ${out.tokens} tok · ${out.forwards} fwd · ${out.seconds.toFixed(1)}s · ${out.tokensPerSecond.toFixed(1)} tok/s`, 'ok');
+  }
+}
+
+function renderTable() {
+  const h = ['mode', 'precision', 'tokens', 'forwards', 'seconds', 'tok/s', 'TTFT(s)'];
+  let t = '<table><tr>' + h.map(x => `<th>${x}</th>`).join('') + '</tr>';
+  for (const r of rows) t += `<tr><td>${r.mode}</td><td>${r.precision}</td><td>${r.tokens}</td><td>${r.forwards}</td><td>${r.seconds}</td><td>${r.tokS}</td><td>${r.ttft ?? '—'}</td></tr>`;
+  $('table').innerHTML = t + '</table>';
+  window.__bench = rows;
+}
+
+// FAIR MEASUREMENT: AR and diffusion each need their own page load — two ORT-web
+// runtimes + WebGPU contexts in one page contend and tank the second one (~3× slower).
+// So gate by ?mode= and run ONE per load. Compare across two loads (same fresh browser):
+//   ?mode=ar    → AR baseline
+//   ?mode=diff  → diffusion steps sweep (default)
+// Also: absolute tok/s drifts down over a long GPU session — measure in a FRESH browser.
+const MODE = new URLSearchParams(location.search).get('mode') || 'diff';
+
+$('go').onclick = async () => {
+  $('go').disabled = true; $('log').textContent = `running (mode=${MODE})…`;
+  try {
+    if (!navigator.gpu) { log('No WebGPU.', 'dim'); return; }
+    if (MODE === 'ar') await benchAR();
+    else await benchDiffusion();
+    renderTable();
+    log('\nDONE. Numbers in window.__bench. (Reload with ?mode=ar / ?mode=diff for the other.)', 'ok');
+  } catch (e) { log('ERROR: ' + (e?.message ?? e)); console.error(e); }
+  finally { $('go').disabled = false; }
+};
+</script>
+</body>
+</html>
