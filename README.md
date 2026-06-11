@@ -96,6 +96,7 @@ reference harness built entirely on this API (it's the live demo).
 ### Requirements & notes
 
 - **Browser:** Chrome/Edge 121+ (WebGPU + fp16). No WebGPU → it won't run; there's no wasm fallback wired up.
+- **Smaller (q4) build:** a 4-bit variant (`onnx/model_q4f16_rtn_sym.onnx`, ~690 MB vs fp16's 1.4 GB) is published too. It needs the newer ORT-web build that has the working WebGPU MatMulNBits kernel — pass `?model=…/onnx/model_q4f16_rtn_sym.onnx&ort=1.26.0-dev.20260416-b7804b056c` (or `DiffusionLM.from_pretrained({model, ortVersion: '1.26.0-dev.20260416-b7804b056c'})`). At 0.6B it's *slower* than fp16 (q4 dequant overhead on a small model); q4's payoff is models too big for fp16. Quantizer: `RTNWeightOnlyQuantConfig` (see reference doc).
 - **Hosting your own model:** any URL that serves the `.onnx` and its `.onnx.data` side-by-side with
   permissive CORS works (Hugging Face `resolve/` URLs do). kohra auto-detects the external-data file.
 - **Perf:** fused-fp16 Qwen3-0.6B-MDLM runs at **~9.8 tok/s** on an M-series Mac (128 denoise
