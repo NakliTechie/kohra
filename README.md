@@ -17,25 +17,62 @@ Two missing pieces, built as one vertically-sliced project (they're only testabl
 1. **ONNX exports of small diffusion LMs** — the riskier half (custom arch configs, MoE quantization constraints).
 2. **A JS denoising/sampling loop** over raw ONNX forward passes — the easier half (~few hundred lines: start masked → forward → lock high-confidence tokens → repeat).
 
-## Use it — drop-in snippet (G1, working today)
+## Use it in a browser (G1, working today)
 
-`web/kohra.js` is a single-file, transformers.js-style ES module: import it, point it at the
-ONNX graph, get diffusion text generation on WebGPU. It self-loads onnxruntime-web + the
-tokenizer from a CDN, so this is the whole integration:
+`web/kohra.js` is a single-file, transformers.js-style ES module: import it, point it at an ONNX
+graph, get masked-diffusion text generation on WebGPU. It self-loads onnxruntime-web (from a CDN)
+and the tokenizer (from Hugging Face), so there's no build step and no server-side inference.
 
-```js
-import { pipeline } from './kohra.js';
+The fp16 model is published at
+[**naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX**](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX).
 
-const generate = await pipeline('text-diffusion', {
-  model: 'models/qwen3-0.6b-mdlm-onnx/model_fp16_fused.onnx',  // fused fp16, 1.4GB
-  tokenizer: 'dllm-hub/Qwen3-0.6B-diffusion-mdlm-v0.1',
-});
+### 1. Get the loader
 
-const { text, tokensPerSecond } = await generate('Lily runs 12 km/h for 4 hours. How far in 8 hours?');
-console.log(text, `(${tokensPerSecond.toFixed(1)} tok/s)`);
+`kohra.js` is one file with no bundler dependency. Copy it into your project:
+
+```sh
+# from this repo
+cp web/kohra.js  your-app/kohra.js
+# or grab it straight from the model repo
+curl -O https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main/kohra.js
 ```
 
-Or the class form, with a per-step callback for the "fog lifting" visualization and sampler knobs:
+(A jsDelivr/npm import will be the one-liner once the package is published; for now copy the file —
+importing JS from a Hugging Face `resolve/` URL is blocked by MIME type, but the **model** loads
+from there fine.)
+
+### 2. Drop it in — a complete, working page
+
+```html
+<!doctype html>
+<meta charset="utf-8">
+<button id="go">Generate</button>
+<pre id="out"></pre>
+<script type="module">
+import { pipeline } from './kohra.js';
+
+const HF = 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main';
+const generate = await pipeline('text-diffusion', {
+  model: `${HF}/onnx/model_fp16_fused.onnx`,           // fp16, ~1.4 GB (browser-cached)
+  tokenizer: 'naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX',
+});
+
+document.getElementById('go').onclick = async () => {
+  const { text, tokensPerSecond } = await generate('Explain WebGPU in one sentence.', {
+    maxNewTokens: 128, steps: 128, stripThink: true,
+  });
+  document.getElementById('out').textContent = `${text}\n\n(${tokensPerSecond.toFixed(1)} tok/s)`;
+};
+</script>
+```
+
+Serve it over **https or localhost** (WebGPU and ES modules both require a secure context):
+`python3 -m http.server 8000` then open `http://localhost:8000`. First run downloads the model and
+compiles WebGPU shaders (tens of seconds); it's cached afterward.
+
+### 3. Stream the denoising for a "fog lifting" UI
+
+The class form exposes a per-step callback and the sampler knobs:
 
 ```js
 import { DiffusionLM } from './kohra.js';
@@ -45,16 +82,23 @@ const out = await lm.generate(prompt, {
   maxNewTokens: 128, steps: 128, blockSize: 32,
   temperature: 0,            // 0 = deterministic argmax; >0 = Gumbel sampling
   stripThink: true,          // drop the leading empty <think></think> block
-  onStep: ({ x, P, fresh, forward }) => renderCanvas(x, P, fresh),
+  onStep: ({ x, P, fresh, forward }) => render(x, P, fresh),  // canvas snapshot per reveal
 });
 // out: { text, tokenIds, tokens, forwards, seconds, tokensPerSecond }
 ```
 
-`web/index.html` is a ~60-line reference harness built entirely on this API. Serve the repo over
-HTTP (`python3 -m http.server 8123`) and open `web/index.html`; first load downloads the model +
-compiles WebGPU shaders. **Status:** fused-fp16 Qwen3-0.6B-MDLM runs at **~9.8 tok/s** on an M-series
-Mac (128 denoise forwards, 1.4GB). The export recipe + WebGPU forensics are in
-[`reference/MDLM-algorithm.md`](reference/MDLM-algorithm.md).
+`x` is the full token canvas (masked positions are `lm.maskId`); `fresh` is the set of positions
+revealed this step — colour those to animate the fog lifting. `web/index.html` is a ~60-line
+reference harness built entirely on this API.
+
+### Requirements & notes
+
+- **Browser:** Chrome/Edge 121+ (WebGPU + fp16). No WebGPU → it won't run; there's no wasm fallback wired up.
+- **Hosting your own model:** any URL that serves the `.onnx` and its `.onnx.data` side-by-side with
+  permissive CORS works (Hugging Face `resolve/` URLs do). kohra auto-detects the external-data file.
+- **Perf:** fused-fp16 Qwen3-0.6B-MDLM runs at **~9.8 tok/s** on an M-series Mac (128 denoise
+  forwards). No KV cache — cost is steps × forward, not tokens. The export recipe + WebGPU forensics
+  (why fp16 needs RMSNorm fused first) are in [`reference/MDLM-algorithm.md`](reference/MDLM-algorithm.md).
 
 ## Gate ladder
 
