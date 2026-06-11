@@ -117,7 +117,13 @@ def main():
     from onnxruntime.transformers.fusion_options import FusionOptions
     from onnxruntime.transformers.onnx_model import OnnxModel
 
-    ref_sess = make_sess(FP32, disable_opt=False)  # fp32 reference (exact-parity to torch)
+    # On a 7B, loading the fp32 ONNX as a parity reference is ~28GB and stacks on the fuse
+    # peak; KOHRA_SKIP_PARITY=1 skips all parity (verify via gencheck instead).
+    skip_parity = bool(os.environ.get("KOHRA_SKIP_PARITY"))
+    ref_sess = None if skip_parity else make_sess(FP32, disable_opt=False)
+    def maybe_parity(*a, **k):
+        if not skip_parity:
+            parity(*a, **k)
     fused_path = os.path.join(OUT_DIR, "model_fp32_fused.onnx")
 
     if os.path.exists(fused_path):
@@ -136,7 +142,7 @@ def main():
         histogram(m.model, "fused fp32")
         m.save_model_to_file(fused_path, use_external_data_format=True)
         print(f"saved -> {fused_path}")
-        parity(ref_sess, fused_path, "fused-fp32", disable_opt=True)
+        maybe_parity(ref_sess, fused_path, "fused-fp32", disable_opt=True)
 
     if args.fp16:
         print("\n== fp16-convert the fused graph (fresh disk load) ==")
@@ -148,7 +154,7 @@ def main():
         fp16_path = os.path.join(OUT_DIR, "model_fp16_fused.onnx")
         m.save_model_to_file(fp16_path, use_external_data_format=True)
         print(f"saved -> {fp16_path}")
-        parity(ref_sess, fp16_path, "fused-fp16", disable_opt=True)
+        maybe_parity(ref_sess, fp16_path, "fused-fp16", disable_opt=True)
 
     if args.q4:
         # Quantize the FUSED FP32 graph (clean weight initializers), not the
@@ -191,7 +197,7 @@ def main():
         qm.save_model_to_file(q4_path, use_external_data_format=True)
         sz = os.path.getsize(q4_path + ".data") / 1e6
         print(f"saved -> {q4_path} ({sz:.0f} MB data)")
-        parity(ref_sess, q4_path, "q4f16-rtn", disable_opt=True)
+        maybe_parity(ref_sess, q4_path, "q4f16-rtn", disable_opt=True)
         print("NOTE: run on WebGPU with ORT-web >= 1.26.0-dev.20260416 (transformers.js's build). "
               "Synthetic-probe masked-argmax ~0.5 understates it; real generation is coherent.")
 
@@ -214,7 +220,7 @@ def main():
         q.model.save_model_to_file(q4_path, use_external_data_format=True)
         sz = os.path.getsize(q4_path + ".data") / 1e6
         print(f"saved -> {q4_path} ({sz:.0f} MB data)")
-        parity(ref_sess, q4_path, "q4-fp32scales", disable_opt=True)
+        maybe_parity(ref_sess, q4_path, "q4-fp32scales", disable_opt=True)
 
     if args.q4_from_fp16:
         from onnxruntime.quantization.matmul_nbits_quantizer import (
@@ -240,7 +246,7 @@ def main():
         q.model.save_model_to_file(q4_path, use_external_data_format=True)
         sz = os.path.getsize(q4_path + ".data") / 1e6
         print(f"saved -> {q4_path} ({sz:.0f} MB data)")
-        parity(ref_sess, q4_path, "q4f16-fromfp16", disable_opt=True)
+        maybe_parity(ref_sess, q4_path, "q4f16-fromfp16", disable_opt=True)
 
 
 if __name__ == "__main__":

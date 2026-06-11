@@ -45,7 +45,7 @@ class LogitsOnly(torch.nn.Module):
 def load(dtype):
     # DreamModel is registered via auto_map (trust_remote_code); it has the lm_head.
     model = transformers.AutoModel.from_pretrained(
-        MODEL_ID, trust_remote_code=True, dtype=dtype, attn_implementation="eager"
+        MODEL_ID, trust_remote_code=True, torch_dtype=dtype, attn_implementation="eager"
     ).eval()
     return LogitsOnly(model)
 
@@ -65,12 +65,16 @@ def export(wrapper, path, dtype):
 
 
 def parity(wrapper, onnx_path, t_len=64):
+    import gc
     import onnxruntime as ort
     torch.manual_seed(0)
     ids = torch.randint(0, 151000, (1, t_len), dtype=torch.long)
     ids[0, 40:] = MASK_ID
     with torch.no_grad():
         ref = wrapper(ids).float().numpy()
+    # free the 7B torch model before loading the ONNX session (keeps parity peak ~= one model)
+    wrapper.model = None
+    gc.collect()
     so = ort.SessionOptions()
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
     got = ort.InferenceSession(onnx_path, so, providers=["CPUExecutionProvider"]).run(
@@ -84,6 +88,7 @@ def parity(wrapper, onnx_path, t_len=64):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fp16", action="store_true", help="export in fp16 (lower peak RAM)")
+    ap.add_argument("--skip-parity", action="store_true", help="skip the torch-vs-ONNX check (rely on gencheck)")
     args = ap.parse_args()
     os.makedirs(OUT_DIR, exist_ok=True)
     dtype = torch.float16 if args.fp16 else torch.float32
@@ -95,9 +100,12 @@ def main():
         print(f"{path} exists, skipping export")
     else:
         export(wrapper, path, dtype)
-    parity(wrapper, path)
-    print("NEXT: scripts/optimize_onnx.py with Dream dims (--num-heads 28 --hidden 3584), "
-          "then --q4 (RTN). See plan/dream-7b-runbook.md.")
+    if args.skip_parity:
+        print("[dream] parity skipped (--skip-parity); verify via gencheck_dream.py")
+    else:
+        parity(wrapper, path)
+    print("NEXT: optimize_onnx.py (KOHRA_MODEL_DIR=models/dream-7b-onnx KOHRA_FP32=model_fp32.onnx "
+          "KOHRA_NUM_HEADS=28 KOHRA_HIDDEN=3584) --fp16 --q4; then gencheck_dream.py.")
 
 
 if __name__ == "__main__":
