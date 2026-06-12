@@ -32,6 +32,7 @@
   .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:10px 0; }
   label { color:var(--dim); font-size:13px; }
   input[type=number] { width:72px; background:#1b1e25; color:var(--fg); border:1px solid #2a2e37; border-radius:6px; padding:4px 6px; font:inherit; }
+  select { background:#1b1e25; color:var(--fg); border:1px solid #2a2e37; border-radius:6px; padding:4px 6px; font:inherit; cursor:pointer; }
   button { background:var(--acc); color:#10131a; border:0; border-radius:8px; padding:8px 18px; font:inherit; font-weight:600; cursor:pointer; }
   button:disabled { opacity:.4; cursor:default; }
   #canvas { background:#1b1e25; border:1px solid #2a2e37; border-radius:8px; padding:14px; margin-top:14px; min-height:120px; white-space:pre-wrap; word-break:break-word; }
@@ -57,6 +58,10 @@
   <p><span id="status" class="status-badge loading"><span class="spinner"></span><span id="statusText">Loading…</span></span></p>
   <textarea id="prompt">Lily runs 12 km/h for 4 hours. How far in 8 hours?</textarea>
   <div class="row">
+    <label>model <select id="modelSel">
+      <option value="mdlm">MDLM</option>
+      <option value="bd3lm">BD3LM · block diffusion</option>
+    </select></label>
     <label>new tokens <input id="maxNew" type="number" value="128" step="32" min="16"></label>
     <label>steps <input id="steps" type="number" value="128" step="16" min="4"></label>
     <label>block <input id="blockSize" type="number" value="32" step="8" min="8"></label>
@@ -83,8 +88,6 @@ import { DiffusionLM } from './kohra.js';
 
 // fused fp16 (G1d): RMSNorm fused to SimplifiedLayerNormalization so WebGPU's native
 // fp16 kernels don't overflow the decomposed Pow(x,2) -> all-zero. ~1.4GB, ~9.8 tok/s.
-const HF = 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main';
-const TOKENIZER_ID = 'naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX';
 const $ = (id) => document.getElementById(id);
 // state: 'loading' (spinner) | 'ready' | 'error'
 const status = (t, state = 'loading') => {
@@ -92,17 +95,34 @@ const status = (t, state = 'loading') => {
   $('status').className = 'status-badge ' + state;
 };
 
+// Model registry — each is a self-contained HF repo (fused fp16 graph + tokenizer + bundled
+// kohra.js). bd3lm (block diffusion) additionally drives the block-causal sampler. The
+// dropdown picks one; ?model= (+ optional ?arch=, ?tokenizer=, ?ort=, ?opt=) overrides for
+// local/dev experiments. MDLM stays the default so the headline demo is unchanged.
+const REGISTRY = {
+  mdlm: {
+    label: 'MDLM',
+    model: 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main/onnx/model_fp16_fused.onnx',
+    tokenizer: 'naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX',
+    blockCausal: false,
+  },
+  bd3lm: {
+    label: 'BD3LM (block diffusion)',
+    model: 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX/resolve/main/onnx/model_fp16_fused.onnx',
+    tokenizer: 'naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX',
+    blockCausal: true,
+  },
+};
+
 const params = new URLSearchParams(location.search);
-const modelUrl = params.get('model') ?? `${HF}/onnx/model_fp16_fused.onnx`;
-// optional overrides for q4/ORT experiments; defaults keep the shipped demo unchanged
+const modelOverride = params.get('model');
+const arch = params.get('arch') || (modelOverride?.includes('bd3lm') ? 'bd3lm' : 'mdlm');
+const preset = REGISTRY[arch] ?? REGISTRY.mdlm;
+const modelUrl = modelOverride ?? preset.model;
+const tokenizerId = params.get('tokenizer') ?? preset.tokenizer;
+const blockCausal = preset.blockCausal;
 const ortVersion = params.get('ort') || undefined;
 const graphOptimizationLevel = params.get('opt') || 'disabled';
-// bd3lm (block diffusion) needs the block-causal sampler + its own tokenizer; opt in via
-// ?arch=bd3lm or a model path containing "bd3lm". Same mask/EOS ids as MDLM (151669/151645).
-const arch = params.get('arch') || (modelUrl.includes('bd3lm') ? 'bd3lm' : 'mdlm');
-const blockCausal = arch === 'bd3lm';
-const tokenizerId = params.get('tokenizer')
-  || (blockCausal ? 'dllm-hub/Qwen3-0.6B-diffusion-bd3lm-v0.1' : TOKENIZER_ID);
 
 let lm;
 
@@ -165,6 +185,10 @@ async function init() {
 addEventListener('error', e => status('Uncaught: ' + (e.error?.message ?? e.message), 'error'));
 addEventListener('unhandledrejection', e => status('Rejection: ' + (e.reason?.message ?? e.reason), 'error'));
 $('go').addEventListener('click', generate);
+// Model picker: reflect the active arch, and reload with the chosen preset on change
+// (drop any ?model override so the registry URL is used).
+$('modelSel').value = arch;
+$('modelSel').addEventListener('change', () => { location.search = '?arch=' + $('modelSel').value; });
 init();
 </script>
 </body>
