@@ -59,8 +59,10 @@
   <textarea id="prompt">Lily runs 12 km/h for 4 hours. How far in 8 hours?</textarea>
   <div class="row">
     <label>model <select id="modelSel">
-      <option value="mdlm">MDLM</option>
-      <option value="bd3lm">BD3LM · block diffusion</option>
+      <option value="mdlm">MDLM · fp16</option>
+      <option value="mdlm-q4">MDLM · q4</option>
+      <option value="bd3lm">BD3LM · fp16 · block diffusion</option>
+      <option value="bd3lm-q4">BD3LM · q4 · block diffusion</option>
     </select></label>
     <label>new tokens <input id="maxNew" type="number" value="128" step="32" min="16"></label>
     <label>steps <input id="steps" type="number" value="128" step="16" min="4"></label>
@@ -95,34 +97,37 @@ const status = (t, state = 'loading') => {
   $('status').className = 'status-badge ' + state;
 };
 
-// Model registry — each is a self-contained HF repo (fused fp16 graph + tokenizer + bundled
-// kohra.js). bd3lm (block diffusion) additionally drives the block-causal sampler. The
-// dropdown picks one; ?model= (+ optional ?arch=, ?tokenizer=, ?ort=, ?opt=) overrides for
-// local/dev experiments. MDLM stays the default so the headline demo is unchanged.
+// Model registry — each entry is a self-contained HF repo (graph + tokenizer + bundled
+// kohra.js). bd3lm (block diffusion) drives the block-causal sampler; q4 variants are a
+// smaller download. The dropdown picks one (reloads with ?arch=<key>); ?model= (+ optional
+// ?arch=, ?tokenizer=, ?ort=, ?opt=) overrides for local/dev. MDLM-fp16 stays the default.
+const REPO = {
+  mdlm:  'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main',
+  bd3lm: 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX/resolve/main',
+};
+const TOKENIZER = {
+  mdlm:  'naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX',
+  bd3lm: 'naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX',
+};
+// q4 (RTN MatMulNBits) needs the ORT-web dev build with the WebGPU q4 fix + full graph opt.
+const ORT_Q4 = '1.26.0-dev.20260416-b7804b056c';
 const REGISTRY = {
-  mdlm: {
-    label: 'MDLM',
-    model: 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main/onnx/model_fp16_fused.onnx',
-    tokenizer: 'naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX',
-    blockCausal: false,
-  },
-  bd3lm: {
-    label: 'BD3LM (block diffusion)',
-    model: 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX/resolve/main/onnx/model_fp16_fused.onnx',
-    tokenizer: 'naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX',
-    blockCausal: true,
-  },
+  'mdlm':     { label: 'MDLM · fp16',                  repo: 'mdlm',  file: 'model_fp16_fused.onnx',    blockCausal: false, q4: false },
+  'mdlm-q4':  { label: 'MDLM · q4 (smaller)',          repo: 'mdlm',  file: 'model_q4f16_rtn_sym.onnx', blockCausal: false, q4: true  },
+  'bd3lm':    { label: 'BD3LM · fp16 · block diff',    repo: 'bd3lm', file: 'model_fp16_fused.onnx',    blockCausal: true,  q4: false },
+  'bd3lm-q4': { label: 'BD3LM · q4 · block diff',      repo: 'bd3lm', file: 'model_q4f16_rtn_sym.onnx', blockCausal: true,  q4: true  },
 };
 
 const params = new URLSearchParams(location.search);
 const modelOverride = params.get('model');
-const arch = params.get('arch') || (modelOverride?.includes('bd3lm') ? 'bd3lm' : 'mdlm');
-const preset = REGISTRY[arch] ?? REGISTRY.mdlm;
-const modelUrl = modelOverride ?? preset.model;
-const tokenizerId = params.get('tokenizer') ?? preset.tokenizer;
+const reqArch = params.get('arch') || (modelOverride?.includes('bd3lm') ? 'bd3lm' : 'mdlm');
+const arch = REGISTRY[reqArch] ? reqArch : 'mdlm';        // unknown key → safe default
+const preset = REGISTRY[arch];
+const modelUrl = modelOverride ?? `${REPO[preset.repo]}/onnx/${preset.file}`;
+const tokenizerId = params.get('tokenizer') ?? TOKENIZER[preset.repo];
 const blockCausal = preset.blockCausal;
-const ortVersion = params.get('ort') || undefined;
-const graphOptimizationLevel = params.get('opt') || 'disabled';
+const ortVersion = params.get('ort') || (preset.q4 ? ORT_Q4 : undefined);
+const graphOptimizationLevel = params.get('opt') || (preset.q4 ? 'all' : 'disabled');
 
 let lm;
 
@@ -171,10 +176,10 @@ async function generate() {
 async function init() {
   try {
     if (!navigator.gpu) { status('This demo needs WebGPU — try Chrome/Edge 121+.', 'error'); return; }
-    status('Loading model… first run downloads ~1.4GB + compiles WebGPU shaders (cached after).');
+    status(`Loading model… first run downloads ${preset.q4 ? '~0.7GB' : '~1.5GB'} + compiles WebGPU shaders (cached after).`);
     lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: tokenizerId, ortVersion, graphOptimizationLevel });
     window.kohra = lm; // handy for the console / preview probing
-    status(`Ready — fused fp16 Qwen3-0.6B-${blockCausal ? 'BD3LM (block diffusion)' : 'MDLM'} on WebGPU. Press Generate.`, 'ready');
+    status(`Ready — ${preset.q4 ? 'q4f16' : 'fused fp16'} Qwen3-0.6B-${blockCausal ? 'BD3LM (block diffusion)' : 'MDLM'} on WebGPU. Press Generate.`, 'ready');
     $('go').disabled = false;
   } catch (e) {
     console.error(e);
