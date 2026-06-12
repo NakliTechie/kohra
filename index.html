@@ -97,6 +97,12 @@ const modelUrl = params.get('model') ?? `${HF}/onnx/model_fp16_fused.onnx`;
 // optional overrides for q4/ORT experiments; defaults keep the shipped demo unchanged
 const ortVersion = params.get('ort') || undefined;
 const graphOptimizationLevel = params.get('opt') || 'disabled';
+// bd3lm (block diffusion) needs the block-causal sampler + its own tokenizer; opt in via
+// ?arch=bd3lm or a model path containing "bd3lm". Same mask/EOS ids as MDLM (151669/151645).
+const arch = params.get('arch') || (modelUrl.includes('bd3lm') ? 'bd3lm' : 'mdlm');
+const blockCausal = arch === 'bd3lm';
+const tokenizerId = params.get('tokenizer')
+  || (blockCausal ? 'dllm-hub/Qwen3-0.6B-diffusion-bd3lm-v0.1' : TOKENIZER_ID);
 
 let lm;
 
@@ -123,6 +129,7 @@ async function generate() {
       blockSize: +$('blockSize').value,
       temperature: +$('temp').value,
       threshold: +$('threshold').value || null,   // Fast-dLLM confidence-threshold decoding
+      blockCausal,                                 // bd3lm: static block-causal attention mask
       stripThink: true,
       onStep: (s) => {
         renderCanvas(s);
@@ -145,9 +152,9 @@ async function init() {
   try {
     if (!navigator.gpu) { status('This demo needs WebGPU — try Chrome/Edge 121+.', 'error'); return; }
     status('Loading model… first run downloads ~1.4GB + compiles WebGPU shaders (cached after).');
-    lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: TOKENIZER_ID, ortVersion, graphOptimizationLevel });
+    lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: tokenizerId, ortVersion, graphOptimizationLevel });
     window.kohra = lm; // handy for the console / preview probing
-    status('Ready — fused fp16 Qwen3-0.6B-MDLM on WebGPU. Press Generate.', 'ready');
+    status(`Ready — fused fp16 Qwen3-0.6B-${blockCausal ? 'BD3LM (block diffusion)' : 'MDLM'} on WebGPU. Press Generate.`, 'ready');
     $('go').disabled = false;
   } catch (e) {
     console.error(e);

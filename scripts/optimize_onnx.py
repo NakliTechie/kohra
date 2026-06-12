@@ -37,6 +37,20 @@ MASK_ID = 151669
 NUM_HEADS = int(os.environ.get("KOHRA_NUM_HEADS", "16"))
 HIDDEN = int(os.environ.get("KOHRA_HIDDEN", "1024"))
 
+# Block diffusion (bd3lm): the graph takes a 2nd input — a [1,1,T,T] additive
+# block-causal attention_mask. Set KOHRA_BLOCK_SIZE=32 so parity feeds that mask too.
+# Unset (0) = single-input MDLM (no attention_mask input). The qwen3 fusion keeps
+# attention decomposed (Softmax stays), so the 4D mask-add survives fusion intact.
+BLOCK_SIZE = int(os.environ.get("KOHRA_BLOCK_SIZE", "0"))
+
+
+def block_causal_mask(t_len, block_size):
+    """[1,1,T,T] additive block-causal mask: 0 where block(key)<=block(query), else -1e9."""
+    pos = np.arange(t_len)
+    bid = pos // block_size
+    allow = bid[None, :] <= bid[:, None]            # [query, key]
+    return np.where(allow, 0.0, -1e9).astype(np.float32).reshape(1, 1, t_len, t_len)
+
 CONTRIB_OPS = {
     "SimplifiedLayerNormalization",
     "SkipSimplifiedLayerNormalization",
@@ -75,8 +89,11 @@ def parity(ref_sess, cand_path, label, t_len=72, disable_opt=True):
     rng = np.random.default_rng(0)
     ids = rng.integers(0, 151000, size=(1, t_len), dtype=np.int64)
     ids[0, 40:] = MASK_ID
-    ref = ref_sess.run(["logits"], {"input_ids": ids})[0].astype(np.float32)
-    cand = make_sess(cand_path, disable_opt).run(["logits"], {"input_ids": ids})[0].astype(np.float32)
+    feeds = {"input_ids": ids}
+    if BLOCK_SIZE:
+        feeds["attention_mask"] = block_causal_mask(t_len, BLOCK_SIZE)
+    ref = ref_sess.run(["logits"], feeds)[0].astype(np.float32)
+    cand = make_sess(cand_path, disable_opt).run(["logits"], feeds)[0].astype(np.float32)
 
     if not np.isfinite(cand).all():
         print(f"[{label}] NON-FINITE in candidate logits ({np.isnan(cand).sum()} nan, "

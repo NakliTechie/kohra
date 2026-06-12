@@ -35,6 +35,9 @@ const GEN_DEFAULTS = {
   threshold: null,       // Fast-dLLM: if set (e.g. 0.9), unmask ALL block positions with
                          // confidence >= threshold per step (min 1) instead of a fixed
                          // count → fewer forwards when the model is confident. null = use `steps`.
+  blockCausal: false,    // bd3lm (block diffusion): pass a static [1,1,T,T] additive
+                         // block-causal attention_mask each forward + denoise on the
+                         // physical pos//blockSize grid. false = MDLM (single-input, no mask).
   chatTemplate: true,    // wrap prompt in Qwen3 ChatML + generation prompt
   stripThink: false,     // drop a leading empty <think>…</think> block from the result
   onStep: null,          // ({ x, P, fresh, block, numBlocks, forward, elapsedMs }) => void
@@ -145,8 +148,42 @@ export class DiffusionLM {
     promptIds.forEach((t, i) => { x[i] = BigInt(t); });
     for (let i = P; i < T; i++) x[i] = MASK;
 
-    const numBlocks = Math.ceil(cfg.maxNewTokens / cfg.blockSize);
+    // Block ranges to denoise, left-to-right. MDLM: blocks start at the prompt end
+    // (P + b·blockSize). bd3lm: blocks live on the absolute pos//blockSize grid, so we
+    // denoise from the physical block containing P — its prompt prefix is fixed, its
+    // masked tail is the first generated tokens (bidirectional within that block).
+    const blocks = [];
+    if (cfg.blockCausal) {
+      for (let blk = Math.floor(P / cfg.blockSize); blk * cfg.blockSize < T; blk++) {
+        blocks.push([blk * cfg.blockSize, Math.min((blk + 1) * cfg.blockSize, T)]);
+      }
+    } else {
+      const numBlocks = Math.ceil(cfg.maxNewTokens / cfg.blockSize);
+      for (let b = 0; b < numBlocks; b++) {
+        const start = P + b * cfg.blockSize;
+        blocks.push([start, Math.min(start + cfg.blockSize, T)]);
+      }
+    }
+    const numBlocks = blocks.length;
     const stepsPerBlock = Math.ceil(cfg.steps / numBlocks);
+
+    // bd3lm's static block-causal additive mask: 0 where block(key) ≤ block(query),
+    // else -1e9. Built once and fed every forward (the graph's 2nd input, fp32). The
+    // mask never changes during sampling; block-causality is what makes the cache-free
+    // full-canvas forward give correct current-block logits despite still-masked future
+    // blocks (a future block can't influence an earlier one).
+    let attnTensor = null;
+    if (cfg.blockCausal) {
+      const m = new Float32Array(T * T);
+      for (let q = 0; q < T; q++) {
+        const bq = Math.floor(q / cfg.blockSize);
+        const row = q * T;
+        for (let k = 0; k < T; k++) {
+          m[row + k] = Math.floor(k / cfg.blockSize) <= bq ? 0 : -1e9;
+        }
+      }
+      attnTensor = new ort.Tensor('float32', m, [1, 1, T, T]);
+    }
 
     let forward = 0;
     const t0 = performance.now();
@@ -156,8 +193,7 @@ export class DiffusionLM {
     };
 
     for (let b = 0; b < numBlocks; b++) {
-      const start = P + b * cfg.blockSize;
-      const end = Math.min(start + cfg.blockSize, T);
+      const [start, end] = blocks[b];
       const nMasked = inBlockMasked(start, end);
       if (nMasked === 0) continue;
 
@@ -168,9 +204,9 @@ export class DiffusionLM {
 
       while (inBlockMasked(start, end) > 0) {
         if (schedule && step >= schedule.length) break;
-        const out = await this.session.run({
-          input_ids: new ort.Tensor('int64', x.slice(), [1, T]),
-        });
+        const feeds = { input_ids: new ort.Tensor('int64', x.slice(), [1, T]) };
+        if (attnTensor) feeds.attention_mask = attnTensor;
+        const out = await this.session.run(feeds);
         forward++;
         const logits = out.logits.data;       // Float32Array, [T * V] (ORT upcasts fp16)
         const V = out.logits.dims[2];
