@@ -62,10 +62,11 @@ def main():
             commit = mp[np.argsort(-conf)[:k]]
             x[0, commit] = logits[commit].argmax(-1)
     dt = time.time() - t0
-    gen = x[0, P:].tolist()
-    if EOS_ID in gen:
-        gen = gen[:gen.index(EOS_ID)]
+    raw = x[0, P:].tolist()
     print(f"{nf} forwards in {dt:.1f}s ({dt/nf:.2f}s/fwd, CPU)")
+    print("DEBUG prompt_len P =", P, "| first 12 raw gen ids:", raw[:12])
+    print("DEBUG decode(raw, keep specials):", repr(tok.decode(raw, skip_special_tokens=False)[:200]))
+    gen = raw[:raw.index(EOS_ID)] if EOS_ID in raw else raw
     print("-" * 60)
     print(tok.decode(gen, skip_special_tokens=True))
 

@@ -8,6 +8,15 @@ full-sequence forward is exactly what the diffusion loop needs.
 ⚠ RUN THIS ON THE 64GB MAC STUDIO, not the 24GB laptop (7B export peaks ~30GB fp16 / ~56GB
 fp32). See plan/dream-7b-runbook.md. fp16 export keeps peak ~30GB.
 
+⚠⚠ KNOWN BROKEN (2026-06-12): the legacy TorchScript exporter (dynamo=False) does NOT correctly
+capture Dream's custom modeling_dream.py — the exported ONNX is DEGENERATE (predicts all
+<|endoftext|> at masked positions) while the torch model produces correct content. (Contrast:
+bd3lm, which uses dllm's A2D modeling, exported with EXACT parity.) The --skip-parity flag below
+HID this — ALWAYS run parity at a NON-trace length. FIX PATHS (not yet done): (a) re-export with
+the dynamo exporter (dynamo=True); or (b) load Dream's weights into dllm's exporter-friendly
+A2D-Qwen2 class (dllm/pipelines/a2d/models/qwen2). The fuse + RTN-q4 pipeline downstream is fine —
+only the torch→ONNX trace is wrong.
+
 Pipeline (mirrors the 0.6B): export fp16 → optimize_onnx.py fuses RMSNorm→SimplifiedLayerNorm
 (the fp16-WebGPU fix) → RTN q4 (the WebGPU-compatible quantizer) → ~4GB q4f16.
 
