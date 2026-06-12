@@ -4,7 +4,7 @@
 
 कोहरा — *fog*. Diffusion generation starts as noise and denoises, pass by pass, into clear text.
 
-**[Try it live](https://naklitechie.github.io/kohra)** (needs a WebGPU browser; first load pulls ~1.4GB) · also on [Hugging Face Spaces](https://huggingface.co/spaces/naklitechie/kohra) · model: [naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX)
+**[Try it live](https://naklitechie.github.io/kohra)** (needs a WebGPU browser; first load pulls ~0.7–1.5GB) · also on [Hugging Face Spaces](https://huggingface.co/spaces/naklitechie/kohra). A model picker switches between **MDLM** (masked diffusion) and **BD3LM** (block diffusion), each in fp16 or q4. Models: [Qwen3-0.6B-diffusion-mdlm-ONNX](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX) · [Qwen3-0.6B-diffusion-bd3lm-ONNX](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX)
 
 ## Why
 
@@ -90,13 +90,33 @@ const out = await lm.generate(prompt, {
 ```
 
 `x` is the full token canvas (masked positions are `lm.maskId`); `fresh` is the set of positions
-revealed this step — colour those to animate the fog lifting. `index.html` is a ~60-line
-reference harness built entirely on this API (it's the live demo).
+revealed this step — colour those to animate the fog lifting. `index.html` is the
+reference harness built entirely on this API (it's the live demo, with the model picker).
+
+### Block diffusion (BD3LM)
+
+[`naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX`](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX)
+is a block-diffusion sibling — same 0.6B architecture, but **block-causal** attention (a block
+attends bidirectionally within itself and causally to earlier blocks) and stronger reasoning
+(GSM8K 46.3 vs 29.3, HumanEval 46.3 vs 30.5). Same loader; flip on one flag, `blockCausal: true`:
+
+```js
+const generate = await pipeline('text-diffusion', {
+  model: 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX/resolve/main/onnx/model_fp16_fused.onnx',
+  tokenizer: 'naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX',
+});
+const { text } = await generate('Lily runs 12 km/h for 4 hours. How far in 8 hours?', { blockCausal: true });
+// -> "...48 * 2 = 96 km. Thus, Lily runs \boxed{96} km in 8 hours."
+```
+
+The graph takes a second input — a `[1,1,T,T]` additive block-causal attention mask — which kohra
+builds internally each forward, denoising block-by-block on the `pos // blockSize` grid. No
+app-side math; `blockCausal` is the only difference from the MDLM call.
 
 ### Requirements & notes
 
 - **Browser:** Chrome/Edge 121+ (WebGPU + fp16). No WebGPU → it won't run; there's no wasm fallback wired up.
-- **Smaller (q4) build:** a 4-bit variant (`onnx/model_q4f16_rtn_sym.onnx`, ~690 MB vs fp16's 1.4 GB) is published too. It needs the newer ORT-web build that has the working WebGPU MatMulNBits kernel — pass `?model=…/onnx/model_q4f16_rtn_sym.onnx&ort=1.26.0-dev.20260416-b7804b056c` (or `DiffusionLM.from_pretrained({model, ortVersion: '1.26.0-dev.20260416-b7804b056c'})`). At 0.6B it's *slower* than fp16 (q4 dequant overhead on a small model); q4's payoff is models too big for fp16. Quantizer: `RTNWeightOnlyQuantConfig` (see reference doc).
+- **Smaller (q4) build:** a 4-bit variant (`onnx/model_q4f16_rtn_sym.onnx`, ~680 MB vs fp16's ~1.5 GB) is published for **both** models and is a model-picker option. It runs on WebGPU via the RTN-quantized `MatMulNBits` path (quantizer: `RTNWeightOnlyQuantConfig`) on the newer ORT-web dev build — the picker wires that automatically; by hand, pass `ortVersion: '1.26.0-dev.20260416-b7804b056c'` (or `?model=…/onnx/model_q4f16_rtn_sym.onnx&ort=1.26.0-dev.20260416-b7804b056c&opt=all`). At 0.6B it's *slower* than fp16 (q4 dequant overhead on a small model); q4's payoff is models too big for fp16.
 - **Hosting your own model:** any URL that serves the `.onnx` and its `.onnx.data` side-by-side with
   permissive CORS works (Hugging Face `resolve/` URLs do). kohra auto-detects the external-data file.
 - **Perf:** fused-fp16 Qwen3-0.6B-MDLM runs at **~9.8 tok/s** on an M-series Mac (128 denoise
@@ -105,8 +125,8 @@ reference harness built entirely on this API (it's the live demo).
 
 ## Gate ladder
 
-- **G1 — first coherent block in a browser. ✅ DONE** (fp32 then fused-fp16, ~9.8 tok/s). Target: [`dllm-collection/Qwen3-0.6B-diffusion-mdlm-v0.1`](https://huggingface.co/dllm-collection/Qwen3-0.6B-diffusion-mdlm-v0.1) (Tiny-A2D: Qwen3-0.6B adapted to masked diffusion). onnx-community's AR Qwen3-0.6B export is the conversion template. q4f16 (~500MB) is built and CPU-correct but blocked on a WebGPU `MatMulNBits` kernel bug (see gotchas). Sibling [bd3lm variant](https://huggingface.co/dllm-collection/Qwen3-0.6B-diffusion-bd3lm-v0.1) for block diffusion later.
-- **G2 — sampler quality + perf.** AR-vs-diffusion same-browser A/B **✅ done** (see Benchmark below); step/block schedules measured. Still open: confidence-threshold decoding (Fast-dLLM) for fewer-steps quality.
+- **G1 — first coherent block in a browser. ✅ DONE** (fp32 then fused-fp16, ~9.8 tok/s). Target: [`dllm-collection/Qwen3-0.6B-diffusion-mdlm-v0.1`](https://huggingface.co/dllm-collection/Qwen3-0.6B-diffusion-mdlm-v0.1) (Tiny-A2D: Qwen3-0.6B adapted to masked diffusion). onnx-community's AR Qwen3-0.6B export is the conversion template. q4f16 (~680MB) now runs on WebGPU via RTN quantization. The [bd3lm sibling](https://huggingface.co/dllm-collection/Qwen3-0.6B-diffusion-bd3lm-v0.1) (block diffusion) is also exported and runs in-browser — both ship as model-picker options (fp16 + q4).
+- **G2 — sampler quality + perf. ✅ done.** AR-vs-diffusion same-browser A/B (see Benchmark below); step/block schedules measured; confidence-threshold decoding (Fast-dLLM) shipped (~2× fewer forwards, byte-identical output).
 - **G3 — a genuinely useful model.** [`inclusionAI/LLaDA-MoE-7B-A1B-Instruct`](https://huggingface.co/inclusionAI/LLaDA-MoE-7B-A1B-Instruct) (+ `-Instruct-TD`, trajectory-distilled for fewer denoise steps). First open MoE diffusion LM: 7B total / 1.4B active, quality ≈ Qwen2.5-3B-Instruct. Size class already proven in-browser by LFM2-8B-A1B.
 - **G4 — LocalMind integration** via its runtime-adapter `MODELS` pattern.
 - **North star — DiffusionGemma** ([`google/diffusiongemma-26B-A4B-it`](https://huggingface.co/google/diffusiongemma-26B-A4B-it), Apache 2.0). **Weights launched 2026-06-10** (Gemma-4 backbone, 26B total / 3.8B active MoE, multimodal, 256K context; GGUF/MLX/vLLM out). 26B total (~18GB q4) is past browser physics — desktop play now actionable via MLX 4-bit on a big-RAM Mac. The browser angle is a future small/distilled diffusion-Gemma variant (watch [Gemma 4 E2B/E4B](https://huggingface.co/google/gemma-4-E2B) — those small sizes are AR today, but a diffusion variant at that scale would be the browser-feasible ambitious target).
@@ -136,9 +156,9 @@ Same Qwen3-0.6B lineage, same browser/WebGPU, fp16: **AR** ([onnx-community/Qwen
 
 - **ORT-web WebGPU cannot run asymmetric/zero-point QMoE** → all MoE quantization must be symmetric (lesson carried over from LocalMind's LFM2-8B-A1B work).
 - **fp16 on WebGPU needs the RMSNorm fused first.** A decomposed `Pow(x,2)` RMSNorm overflows native fp16 on WebGPU → silent all-zero logits (CPU/wasm reduce in fp32 and hide it). Fix: ORT's offline transformer optimizer (`model_type=qwen3`) fuses it to `SimplifiedLayerNormalization` before fp16-convert. See `reference/MDLM-algorithm.md`.
-- **Dense q4 (`MatMulNBits`) miscomputes on WebGPU here.** On this Apple GPU + ORT-web 1.26.0, every q4f16 config (sym/asym, opt-level, scale-dtype, accuracy_level) decodes correctly on CPU but yields sane-magnitude-but-wrong logits on WebGPU. q4 is parked pending an upstream fix / newer ORT-web; fp16 ships.
+- **Dense q4 (`MatMulNBits`) on WebGPU needs RTN packing + a newer ORT-web.** `DefaultWeightOnlyQuantConfig` decodes correctly on CPU but yields sane-magnitude-but-wrong logits on WebGPU (every sym/asym/opt-level/scale-dtype variant). The fix: `RTNWeightOnlyQuantConfig` (the genai / neural-compressor RTN path) packs weights the way ORT-web's WebGPU kernel expects → coherent generation, on ORT-web ≥ `1.26.0-dev.20260416`. It was the weight packing, not a kernel bug. fp16 stays the 0.6B default (q4 is slower at this size); q4 is for models too big for fp16.
 - **Transformers.js `generate()` is AR-only** — bypass it; call the model's forward directly (or use a raw ORT-web session).
-- **MDLM has no KV cache** (bidirectional attention, full forward per denoise step) — the perf profile is steps × block-length, not tokens. BD3LM restores block-level KV caching.
+- **MDLM has no KV cache** (bidirectional attention, full forward per denoise step) — the perf profile is steps × block-length, not tokens. BD3LM's architecture supports block-level KV caching, but kohra runs it **cache-free** in the browser (a static block-causal mask + full forward), since the loop-free ONNX export has no cache state to thread.
 - **Watch item:** if Transformers.js ships native diffusion-loop support, fold into it rather than compete.
 
 ## Siblings
