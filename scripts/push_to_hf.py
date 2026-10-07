@@ -101,6 +101,10 @@ Requires a WebGPU browser (Chrome/Edge 121+) served over https or localhost. ~1.
   `SimplifiedLayerNormalization`. The fusion is **required**: a decomposed `Pow(x,2)` RMSNorm
   overflows native fp16 on WebGPU and silently produces all-zero logits; the fused contrib op
   reduces in fp32. Recipe + forensics: the kohra repo's `reference/MDLM-algorithm.md`.
+- `onnx/model_q4f16_rtn_sym.onnx` (+ `.onnx.data`) — 4-bit (RTN, symmetric) q4f16, ~680 MB.
+  Coherent on WebGPU with stable onnxruntime-web 1.30.0, the version `kohra.js` loads; pass
+  `graphOptimizationLevel: 'all'`. The RTN packing is what ORT-web's WebGPU `MatMulNBits`
+  kernel expects; the default quantizer's packing yields wrong logits on WebGPU.
 - Tokenizer files (Qwen3 ChatML).
 
 ## Notes

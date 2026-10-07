@@ -121,8 +121,6 @@ const TOKENIZER = {
   mdlm:  'naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX',
   bd3lm: 'naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX',
 };
-// q4 (RTN MatMulNBits) needs the ORT-web dev build with the WebGPU q4 fix + full graph opt.
-const ORT_Q4 = '1.26.0-dev.20260416-b7804b056c';
 const REGISTRY = {
   'mdlm':     { label: 'MDLM · fp16',                  repo: 'mdlm',  file: 'model_fp16_fused.onnx',    blockCausal: false, q4: false },
   'mdlm-q4':  { label: 'MDLM · q4 (smaller)',          repo: 'mdlm',  file: 'model_q4f16_rtn_sym.onnx', blockCausal: false, q4: true  },
@@ -138,7 +136,7 @@ const preset = REGISTRY[arch];
 const modelUrl = modelOverride ?? `${REPO[preset.repo]}/onnx/${preset.file}`;
 const tokenizerId = params.get('tokenizer') ?? TOKENIZER[preset.repo];
 const blockCausal = preset.blockCausal;
-const ortVersion = params.get('ort') || (preset.q4 ? ORT_Q4 : undefined);
+const ortVersion = params.get('ort') || undefined;           // default: kohra.js's pinned stable build
 const graphOptimizationLevel = params.get('opt') || (preset.q4 ? 'all' : 'disabled');
 
 let lm;

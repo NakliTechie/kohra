@@ -19,7 +19,7 @@
 // full canvas); the whole denoising loop lives here in JS. Algorithm spec + the export
 // recipe (fused fp16 for WebGPU) are in reference/MDLM-algorithm.md.
 
-import * as ortDefault from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.26.0/dist/ort.webgpu.min.mjs';
+import * as ortDefault from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.webgpu.min.mjs';
 import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm';
 
 // Tiny-A2D Qwen3-0.6B MDLM token ids (tokenizer.mask_token_id / <|im_end|>).
