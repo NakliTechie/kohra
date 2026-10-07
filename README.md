@@ -11,6 +11,8 @@
   <a href="https://huggingface.co/naklitechie"><img alt="models: 2 on Hugging Face" src="https://img.shields.io/badge/models-2%20on%20Hugging%20Face-4a6fa5?style=flat-square"></a>
 </p>
 
+<p align="center"><img alt="The kohra card: a token canvas mid-generation, revealed words beside still-masked blocks" src="marketing/social.png" width="720"></p>
+
 कोहरा means *fog*. Generation starts as a fully masked canvas and clears, pass by pass, into text.
 
 ## Install
