@@ -1,167 +1,105 @@
-# kohra
+<h1 align="center">kohra</h1>
 
-> Text-diffusion language models running in the browser — a JS denoising loop over ONNX Runtime Web / WebGPU. To our knowledge, the first in-browser *text*-diffusion generation.
+<p align="center"><b>Text-diffusion language models that generate in your browser: one JS file runs the denoising loop over ONNX Runtime Web on WebGPU.</b></p>
 
-कोहरा — *fog*. Diffusion generation starts as noise and denoises, pass by pass, into clear text.
+<p align="center">One ES module. Chrome or Edge 121+ with WebGPU. No server, no account, no telemetry: the model runs on your GPU.</p>
 
-**[Try it live](https://naklitechie.github.io/kohra)** (needs a WebGPU browser; first load pulls ~0.7–1.5GB) · also on [Hugging Face Spaces](https://huggingface.co/spaces/naklitechie/kohra). A model picker switches between **MDLM** (masked diffusion) and **BD3LM** (block diffusion), each in fp16 or q4. Models: [Qwen3-0.6B-diffusion-mdlm-ONNX](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX) · [Qwen3-0.6B-diffusion-bd3lm-ONNX](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX)
+<p align="center">
+  <a href="https://naklitechie.github.io/kohra"><img alt="demo: live" src="https://img.shields.io/badge/demo-live-4a6fa5?style=flat-square"></a>
+  <img alt="runtime: WebGPU" src="https://img.shields.io/badge/runtime-WebGPU-4a6fa5?style=flat-square">
+  <img alt="server: none" src="https://img.shields.io/badge/server-none-4a6fa5?style=flat-square">
+  <a href="https://huggingface.co/naklitechie"><img alt="models: 2 on Hugging Face" src="https://img.shields.io/badge/models-2%20on%20Hugging%20Face-4a6fa5?style=flat-square"></a>
+</p>
 
-## Why
+कोहरा means *fog*. Generation starts as a fully masked canvas and clears, pass by pass, into text.
 
-Google's [DiffusionGemma](https://huggingface.co/google/diffusiongemma-26B-A4B-it) (weights launched 2026-06-10, Apache 2.0) put text diffusion on the map: instead of token-by-token autoregression, the model generates whole 256-token blocks in parallel via iterative denoising (~48 steps) — up to 4× faster on GPUs (1000+ tok/s on an H100). But it's a 26B-A4B MoE (~18 GB quantized — past browser physics), and **no browser runtime anywhere supports a diffusion generation loop** — Transformers.js, onnxruntime-web, and MLC/WebLLM are all autoregressive-only.
+## Install
 
-The irony: parallel block-denoising plays to WebGPU batch throughput *exactly* where sequential AR decode is the browser's bottleneck. Diffusion should eventually be a better fit for in-browser inference than AR is. kohra builds the missing stack.
+| Path | How |
+|---|---|
+| Try it, nothing to install | Open the [live demo](https://naklitechie.github.io/kohra) (also on [Hugging Face Spaces](https://huggingface.co/spaces/naklitechie/kohra)) |
+| Use it in your page | `cp kohra.js your-app/` from this repo |
+| Without cloning | `curl -O https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main/kohra.js` |
 
-## The thesis
-
-Two missing pieces, built as one vertically-sliced project (they're only testable against each other):
-
-1. **ONNX exports of small diffusion LMs** — the riskier half (custom arch configs, MoE quantization constraints).
-2. **A JS denoising/sampling loop** over raw ONNX forward passes — the easier half (~few hundred lines: start masked → forward → lock high-confidence tokens → repeat).
-
-## Use it in a browser (G1, working today)
-
-`kohra.js` is a single-file, transformers.js-style ES module: import it, point it at an ONNX
-graph, get masked-diffusion text generation on WebGPU. It self-loads onnxruntime-web (from a CDN)
-and the tokenizer (from Hugging Face), so there's no build step and no server-side inference.
-
-The fp16 model is published at
-[**naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX**](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX).
-
-### 1. Get the loader
-
-`kohra.js` is one file with no bundler dependency. Copy it into your project:
-
-```sh
-# from this repo
-cp kohra.js  your-app/kohra.js
-# or grab it straight from the model repo
-curl -O https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main/kohra.js
-```
-
-(A jsDelivr/npm import will be the one-liner once the package is published; for now copy the file —
-importing JS from a Hugging Face `resolve/` URL is blocked by MIME type, but the **model** loads
-from there fine.)
-
-### 2. Drop it in — a complete, working page
+The first load pulls the model (~1.5 GB fp16, ~0.7 GB q4) and compiles WebGPU shaders. Your browser caches both, so later loads start in seconds. `kohra.js` loads onnxruntime-web from a CDN and the tokenizer from Hugging Face itself, so there is no build step. A complete page:
 
 ```html
-<!doctype html>
-<meta charset="utf-8">
-<button id="go">Generate</button>
-<pre id="out"></pre>
+<button id="go">Generate</button><pre id="out"></pre>
 <script type="module">
 import { pipeline } from './kohra.js';
-
-const HF = 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main';
 const generate = await pipeline('text-diffusion', {
-  model: `${HF}/onnx/model_fp16_fused.onnx`,           // fp16, ~1.4 GB (browser-cached)
+  model: 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main/onnx/model_fp16_fused.onnx',
   tokenizer: 'naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX',
 });
-
 document.getElementById('go').onclick = async () => {
-  const { text, tokensPerSecond } = await generate('Explain WebGPU in one sentence.', {
-    maxNewTokens: 128, steps: 128, stripThink: true,
-  });
-  document.getElementById('out').textContent = `${text}\n\n(${tokensPerSecond.toFixed(1)} tok/s)`;
+  const { text } = await generate('Explain WebGPU in one sentence.', { maxNewTokens: 128, steps: 128, stripThink: true });
+  document.getElementById('out').textContent = text;
 };
 </script>
 ```
 
-Serve it over **https or localhost** (WebGPU and ES modules both require a secure context):
-`python3 -m http.server 8000` then open `http://localhost:8000`. First run downloads the model and
-compiles WebGPU shaders (tens of seconds); it's cached afterward.
+Serve it over https or localhost, because WebGPU needs a secure context: `python3 -m http.server 8000`. No config file and no API key. Importing `kohra.js` straight from a Hugging Face `resolve/` URL is blocked by MIME type, so copy the file.
 
-### 3. Stream the denoising for a "fog lifting" UI
+## Why
 
-The class form exposes a per-step callback and the sampler knobs:
+You want to try text diffusion, the alternative to token-by-token generation, and every runtime you reach for is autoregressive. Transformers.js, onnxruntime-web and WebLLM all ship only a left-to-right decode loop. The published diffusion models need a Python server and a datacenter GPU.
+
+kohra is the missing piece for the browser. It runs a few hundred lines of JS sampler over raw ONNX forward passes, plus ONNX exports of two small diffusion LMs that run on WebGPU. At 0.6B on a laptop, autoregressive decoding is still faster (see the benchmark in [KOHRA.md](KOHRA.md)). kohra is for running, measuring and building on diffusion in the browser, not for winning on speed today.
+
+## Watch the fog lift
+
+`DiffusionLM` exposes the sampler and a callback for each step. `x` is the full token canvas, where masked positions equal `lm.maskId`. `fresh` holds the positions revealed in this step: colour them to animate the fog clearing.
 
 ```js
 import { DiffusionLM } from './kohra.js';
-
 const lm = await DiffusionLM.from_pretrained({ model, tokenizer });
 const out = await lm.generate(prompt, {
   maxNewTokens: 128, steps: 128, blockSize: 32,
-  temperature: 0,            // 0 = deterministic argmax; >0 = Gumbel sampling
-  stripThink: true,          // drop the leading empty <think></think> block
-  onStep: ({ x, P, fresh, forward }) => render(x, P, fresh),  // canvas snapshot per reveal
+  temperature: 0,      // 0 = argmax; >0 = Gumbel sampling
+  threshold: 0.9,      // Fast-dLLM: reveal every position above this confidence; null = fixed steps
+  onStep: ({ x, P, fresh, forward }) => render(x, P, fresh),
 });
 // out: { text, tokenIds, tokens, forwards, seconds, tokensPerSecond }
 ```
 
-`x` is the full token canvas (masked positions are `lm.maskId`); `fresh` is the set of positions
-revealed this step — colour those to animate the fog lifting. `index.html` is the
-reference harness built entirely on this API (it's the live demo, with the model picker).
+`threshold: 0.9` is the one speed setting to turn on. On the math prompt it cuts 128 forward passes to 61 with identical output. [`index.html`](index.html) is the live demo, built only on this API.
 
-### Block diffusion (BD3LM)
+## Pick a model
 
-[`naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX`](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX)
-is a block-diffusion sibling — same 0.6B architecture, but **block-causal** attention (a block
-attends bidirectionally within itself and causally to earlier blocks) and stronger reasoning
-(GSM8K 46.3 vs 29.3, HumanEval 46.3 vs 30.5). Same loader; flip on one flag, `blockCausal: true`:
+You get two models, each in fp16 and q4. The demo's model picker switches between all four.
 
-```js
-const generate = await pipeline('text-diffusion', {
-  model: 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX/resolve/main/onnx/model_fp16_fused.onnx',
-  tokenizer: 'naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX',
-});
-const { text } = await generate('Lily runs 12 km/h for 4 hours. How far in 8 hours?', { blockCausal: true });
-// -> "...48 * 2 = 96 km. Thus, Lily runs \boxed{96} km in 8 hours."
+| Model | Attention | Call with | Notes |
+|---|---|---|---|
+| [MDLM](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX) | bidirectional | default | the original masked-diffusion checkpoint |
+| [BD3LM](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX) | block-causal | `blockCausal: true` | higher scores: GSM8K 46.3 vs 29.3, HumanEval 46.3 vs 30.5 |
+
+The q4 graphs are `onnx/model_q4f16_rtn_sym.onnx` and need a newer ORT-web build: pass `ortVersion: '1.26.0-dev.20260416-b7804b056c'`. At 0.6B, q4 is slower than fp16. Use it for the smaller download. To host your own export, serve the `.onnx` and `.onnx.data` side by side with permissive CORS. kohra finds the external-data file without configuration.
+
+## Commands
+
+```sh
+python3 -m http.server 8791                              # serve the demo and harnesses at localhost:8791
+open http://localhost:8791/?arch=bd3lm                   # demo on a chosen model: mdlm | mdlm-q4 | bd3lm | bd3lm-q4
+open http://localhost:8791/web/bench.html?mode=diff      # diffusion step sweep + conf≥0.9 (add &arch=bd3lm)
+open http://localhost:8791/web/bench.html?mode=ar        # autoregressive Qwen3-0.6B baseline, same browser
+open http://localhost:8791/web/probe.html?model=<url>    # one fixed forward on WebGPU: finite, non-zero, argmax match
+.venv/bin/python scripts/export_onnx.py --fp16           # export MDLM to ONNX + parity check (export_bd3lm.py for BD3LM)
+.venv/bin/python scripts/optimize_onnx.py                # fuse RMSNorm, then fp16 (required for WebGPU)
+.venv/bin/python scripts/sample_onnx.py --model <onnx>   # reference denoising loop in numpy (gencheck_bd3lm.py for BD3LM)
+.venv/bin/python scripts/push_to_hf.py --model mdlm --stage meta   # publish graph + tokenizer + card + kohra.js
 ```
 
-The graph takes a second input — a `[1,1,T,T]` additive block-causal attention mask — which kohra
-builds internally each forward, denoising block-by-block on the `pos // blockSize` grid. No
-app-side math; `blockCausal` is the only difference from the MDLM call.
+## Verify it yourself
 
-### Requirements & notes
+```sh
+open http://localhost:8791/web/probe.html?model=<url>    # WebGPU logits vs the fp32 CPU ground truth
+open http://localhost:8791/web/bench.html?mode=diff      # forwards, seconds and text per configuration
+```
 
-- **Browser:** Chrome/Edge 121+ (WebGPU + fp16). No WebGPU → it won't run; there's no wasm fallback wired up.
-- **Smaller (q4) build:** a 4-bit variant (`onnx/model_q4f16_rtn_sym.onnx`, ~680 MB vs fp16's ~1.5 GB) is published for **both** models and is a model-picker option. It runs on WebGPU via the RTN-quantized `MatMulNBits` path (quantizer: `RTNWeightOnlyQuantConfig`) on the newer ORT-web dev build — the picker wires that automatically; by hand, pass `ortVersion: '1.26.0-dev.20260416-b7804b056c'` (or `?model=…/onnx/model_q4f16_rtn_sym.onnx&ort=1.26.0-dev.20260416-b7804b056c&opt=all`). At 0.6B it's *slower* than fp16 (q4 dequant overhead on a small model); q4's payoff is models too big for fp16.
-- **Hosting your own model:** any URL that serves the `.onnx` and its `.onnx.data` side-by-side with
-  permissive CORS works (Hugging Face `resolve/` URLs do). kohra auto-detects the external-data file.
-- **Perf:** fused-fp16 Qwen3-0.6B-MDLM runs at **~9.8 tok/s** on an M-series Mac (128 denoise
-  forwards). No KV cache — cost is steps × forward, not tokens. The export recipe + WebGPU forensics
-  (why fp16 needs RMSNorm fused first) are in [`reference/MDLM-algorithm.md`](reference/MDLM-algorithm.md).
+The probe fails a graph that returns non-finite or all-zero logits on WebGPU, or whose argmax disagrees with the fp32 reference. That is how the unfused fp16 graph was caught. The bench was run end to end on 2026-10-07 for both fp16 models, and it reports every number in the [KOHRA.md](KOHRA.md) benchmark. kohra has no automated test suite yet; these two pages are the gate.
 
-## Gate ladder
+## License
 
-- **G1 — first coherent block in a browser. ✅ DONE** (fp32 then fused-fp16, ~9.8 tok/s). Target: [`dllm-collection/Qwen3-0.6B-diffusion-mdlm-v0.1`](https://huggingface.co/dllm-collection/Qwen3-0.6B-diffusion-mdlm-v0.1) (Tiny-A2D: Qwen3-0.6B adapted to masked diffusion). onnx-community's AR Qwen3-0.6B export is the conversion template. q4f16 (~680MB) now runs on WebGPU via RTN quantization. The [bd3lm sibling](https://huggingface.co/dllm-collection/Qwen3-0.6B-diffusion-bd3lm-v0.1) (block diffusion) is also exported and runs in-browser — both ship as model-picker options (fp16 + q4).
-- **G2 — sampler quality + perf. ✅ done.** AR-vs-diffusion same-browser A/B (see Benchmark below); step/block schedules measured; confidence-threshold decoding (Fast-dLLM) shipped (~2× fewer forwards, byte-identical output).
-- **G3 — a genuinely useful model.** [`inclusionAI/LLaDA-MoE-7B-A1B-Instruct`](https://huggingface.co/inclusionAI/LLaDA-MoE-7B-A1B-Instruct) (+ `-Instruct-TD`, trajectory-distilled for fewer denoise steps). First open MoE diffusion LM: 7B total / 1.4B active, quality ≈ Qwen2.5-3B-Instruct. Size class already proven in-browser by LFM2-8B-A1B.
-- **G4 — LocalMind integration** via its runtime-adapter `MODELS` pattern.
-- **North star — DiffusionGemma** ([`google/diffusiongemma-26B-A4B-it`](https://huggingface.co/google/diffusiongemma-26B-A4B-it), Apache 2.0). **Weights launched 2026-06-10** (Gemma-4 backbone, 26B total / 3.8B active MoE, multimodal, 256K context; GGUF/MLX/vLLM out). 26B total (~18GB q4) is past browser physics — desktop play now actionable via MLX 4-bit on a big-RAM Mac. The browser angle is a future small/distilled diffusion-Gemma variant (watch [Gemma 4 E2B/E4B](https://huggingface.co/google/gemma-4-E2B) — those small sizes are AR today, but a diffusion variant at that scale would be the browser-feasible ambitious target).
+No license file is published yet. Until one is added, the code is all rights reserved. The models carry the licences of their [dllm-collection](https://huggingface.co/dllm-collection) upstreams.
 
-## Benchmark: autoregressive vs masked diffusion (same browser)
-
-Same Qwen3-0.6B lineage, same browser/WebGPU, fp16: **AR** ([onnx-community/Qwen3-0.6B-ONNX](https://huggingface.co/onnx-community/Qwen3-0.6B-ONNX) via transformers.js) vs **diffusion** (this project, fused fp16). Harness: `web/bench.html` (load `?mode=ar` and `?mode=diff` in separate fresh tabs — two ORT-web runtimes in one page contend). 128 new tokens, M-series Mac.
-
-| mode | tok/s | forwards | latency | quality |
-|---|---|---|---|---|
-| **AR** (sequential + KV cache) | **27.7** | 117 | 4.2 s | coherent |
-| diffusion · 128 steps | 3.2 | 128 | 38.7 s | coherent |
-| diffusion · 64 steps | 6.1 | 64 | 20.3 s | coherent |
-| diffusion · 32 steps | 12.0 | 32 | 10.1 s | coherent (minor repetition) |
-
-**Fast-dLLM confidence-threshold decoding** (`generate({threshold: 0.9})`, or the `conf≥` field in the demo): instead of revealing a fixed count per step, unmask *every* position above a confidence bar. Measured: **128→61 forwards, ~2× faster, byte-identical output** on the math prompt — a free speedup when the model is confident.
-
-**Takeaways.** (1) Diffusion cost is **linear in steps** — halving steps doubles throughput (128→64→32 ⇒ 3.2→6.1→12.0 tok/s), and output stays coherent down to ~64 steps. Step-reduction is *the* speed lever (and threshold decoding does it adaptively, for free). (2) **At 0.6B on a laptop, AR wins**: each AR step is a width-1 matmul + KV cache; each diffusion step is a full-width forward with *no* cache (MDLM has no KV cache), so 128 steps ≈ 128 full forwards. Diffusion's parallel-denoising bet pays off at scale and on throughput-bound hardware (DiffusionGemma's 4× is measured on H100s, not a laptop 0.6B), and via step-reduction (Fast-dLLM, trajectory distillation). (3) **Caveat:** absolute tok/s drifts with GPU/session state (a fresh browser measured diffusion-128 at ~9.8 tok/s vs 3.2 late in a long session); the AR/diffusion *ratio* and the linear step-scaling are the robust results.
-
-## Reference code
-
-- [dLLM toolkit](https://github.com/ZHZisZZ/dllm) (Apache-2.0) — unified samplers (`dllm/core/samplers/`), A2D conversion + Tiny-A2D training/inference scripts (`examples/a2d`), Fast-dLLM caching + confidence-threshold decode.
-- [LLaDA official](https://github.com/ML-GSAI/LLaDA) · [dInfer](https://github.com/inclusionAI/dInfer) (inclusionAI's diffusion-LM inference framework).
-- Models: [dllm-collection](https://huggingface.co/dllm-collection) (Tiny-A2D) · [inclusionAI](https://huggingface.co/inclusionAI) (LLaDA-MoE, LLaDA2.0).
-
-## Known constraints / gotchas
-
-- **ORT-web WebGPU cannot run asymmetric/zero-point QMoE** → all MoE quantization must be symmetric (lesson carried over from LocalMind's LFM2-8B-A1B work).
-- **fp16 on WebGPU needs the RMSNorm fused first.** A decomposed `Pow(x,2)` RMSNorm overflows native fp16 on WebGPU → silent all-zero logits (CPU/wasm reduce in fp32 and hide it). Fix: ORT's offline transformer optimizer (`model_type=qwen3`) fuses it to `SimplifiedLayerNormalization` before fp16-convert. See `reference/MDLM-algorithm.md`.
-- **Dense q4 (`MatMulNBits`) on WebGPU needs RTN packing + a newer ORT-web.** `DefaultWeightOnlyQuantConfig` decodes correctly on CPU but yields sane-magnitude-but-wrong logits on WebGPU (every sym/asym/opt-level/scale-dtype variant). The fix: `RTNWeightOnlyQuantConfig` (the genai / neural-compressor RTN path) packs weights the way ORT-web's WebGPU kernel expects → coherent generation, on ORT-web ≥ `1.26.0-dev.20260416`. It was the weight packing, not a kernel bug. fp16 stays the 0.6B default (q4 is slower at this size); q4 is for models too big for fp16.
-- **Transformers.js `generate()` is AR-only** — bypass it; call the model's forward directly (or use a raw ORT-web session).
-- **MDLM has no KV cache** (bidirectional attention, full forward per denoise step) — the perf profile is steps × block-length, not tokens. BD3LM's architecture supports block-level KV caching, but kohra runs it **cache-free** in the browser (a static block-causal mask + full forward), since the loop-free ONNX export has no cache state to thread.
-- **Watch item:** if Transformers.js ships native diffusion-loop support, fold into it rather than compete.
-
-## Siblings
-
-- **kiln** (`~/Code/kiln/`) — the MLC/WebLLM port track (compiler-level work). kohra is the ONNX + JS-loop track: no compiler, no TVM.
-- **LocalMind** (`~/Code/naklios-universe/LocalMind/`) — the consumer surface, gate G4.
+[KOHRA.md](KOHRA.md) (why, gate ladder, benchmark, gotchas) · [reference/MDLM-algorithm.md](reference/MDLM-algorithm.md) (export recipe and WebGPU forensics)
