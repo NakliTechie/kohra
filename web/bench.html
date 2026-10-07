@@ -30,8 +30,13 @@ const log = (s, cls) => { $('log').innerHTML += `\n${cls ? `<span class="${cls}"
 const PROMPT = 'Lily runs 12 km/h for 4 hours. How far in 8 hours?';
 const MAX_NEW = 128;
 const AR_MODEL = 'onnx-community/Qwen3-0.6B-ONNX';
-const DIFF_MODEL = '../models/qwen3-0.6b-mdlm-onnx/model_fp16_fused.onnx';
-const TOKENIZER = 'dllm-hub/Qwen3-0.6B-diffusion-mdlm-v0.1';
+// ?arch=mdlm|bd3lm picks the published fp16 graph on HF; ?model= (+ ?tokenizer=) overrides for a local copy.
+const Q = new URLSearchParams(location.search);
+const ARCH = Q.get('arch') === 'bd3lm' ? 'bd3lm' : 'mdlm';
+const HF_REPO = `naklitechie/Qwen3-0.6B-diffusion-${ARCH}-ONNX`;
+const DIFF_MODEL = Q.get('model') ?? `https://huggingface.co/${HF_REPO}/resolve/main/onnx/model_fp16_fused.onnx`;
+const TOKENIZER = Q.get('tokenizer') ?? HF_REPO;
+const BLOCK_CAUSAL = ARCH === 'bd3lm';
 const rows = [];
 
 function chatml(text) { return `<|im_start|>user\n${text}<|im_end|>\n<|im_start|>assistant\n`; }
@@ -58,15 +63,17 @@ async function benchAR() {
 }
 
 async function benchDiffusion() {
-  log('\n[diffusion] loading kohra fused fp16…', 'dim');
+  log(`\n[diffusion] loading kohra ${ARCH} fused fp16…`, 'dim');
   const lm = await DiffusionLM.from_pretrained({ model: DIFF_MODEL, tokenizer: TOKENIZER });
-  for (const steps of [128, 64, 32]) {
-    const out = await lm.generate(PROMPT, { maxNewTokens: MAX_NEW, steps, blockSize: 32, stripThink: true });
-    rows.push({ mode: `diffusion (parallel, ${steps} steps)`, precision: 'fp16', tokens: out.tokens,
+  const run = async (label, opts) => {
+    const out = await lm.generate(PROMPT, { maxNewTokens: MAX_NEW, blockSize: 32, stripThink: true, blockCausal: BLOCK_CAUSAL, ...opts });
+    rows.push({ mode: `diffusion (${label})`, precision: 'fp16', tokens: out.tokens,
                 forwards: out.forwards, seconds: +out.seconds.toFixed(1), tokS: +out.tokensPerSecond.toFixed(1),
                 ttft: null, text: out.text });
-    log(`[diffusion ${steps}] ${out.tokens} tok · ${out.forwards} fwd · ${out.seconds.toFixed(1)}s · ${out.tokensPerSecond.toFixed(1)} tok/s`, 'ok');
-  }
+    log(`[diffusion ${label}] ${out.tokens} tok · ${out.forwards} fwd · ${out.seconds.toFixed(1)}s · ${out.tokensPerSecond.toFixed(1)} tok/s\n  ${out.text.slice(0, 160).replace(/\n/g, ' ')}`, 'ok');
+  };
+  for (const steps of [128, 64, 32]) await run(`parallel, ${steps} steps`, { steps });
+  await run('conf≥0.9, 128 steps', { steps: 128, threshold: 0.9 });   // Fast-dLLM threshold decoding
 }
 
 function renderTable() {
@@ -82,6 +89,7 @@ function renderTable() {
 // So gate by ?mode= and run ONE per load. Compare across two loads (same fresh browser):
 //   ?mode=ar    → AR baseline
 //   ?mode=diff  → diffusion steps sweep (default)
+//   ?arch=bd3lm → run diffusion on the BD3LM graph instead of MDLM
 // Also: absolute tok/s drifts down over a long GPU session — measure in a FRESH browser.
 const MODE = new URLSearchParams(location.search).get('mode') || 'diff';
 
