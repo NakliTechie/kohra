@@ -100,6 +100,6 @@ The probe fails a graph that returns non-finite or all-zero logits on WebGPU, or
 
 ## License
 
-No license file is published yet. Until one is added, the code is all rights reserved. The models carry the licences of their [dllm-collection](https://huggingface.co/dllm-collection) upstreams.
+[Apache-2.0](LICENSE). The published models carry the licences of their [dllm-collection](https://huggingface.co/dllm-collection) upstreams.
 
 [KOHRA.md](KOHRA.md) (why, gate ladder, benchmark, gotchas) · [reference/MDLM-algorithm.md](reference/MDLM-algorithm.md) (export recipe and WebGPU forensics)
