@@ -58,13 +58,13 @@ const lm = await DiffusionLM.from_pretrained({ model, tokenizer });
 const out = await lm.generate(prompt, {
   maxNewTokens: 128, steps: 128, blockSize: 32,
   temperature: 0,      // 0 = argmax; >0 = Gumbel sampling
-  threshold: 0.9,      // Fast-dLLM: reveal every position above this confidence; null = fixed steps
+  threshold: 0.8,      // Fast-dLLM: reveal every position above this confidence; null = fixed steps
   onStep: ({ x, P, fresh, forward }) => render(x, P, fresh),
 });
 // out: { text, tokenIds, tokens, forwards, seconds, tokensPerSecond }
 ```
 
-`threshold: 0.9` is the one speed setting to turn on. On the math prompt it cuts 128 forward passes to 61 with identical output. [`index.html`](index.html) is the live demo, built only on this API.
+`threshold: 0.8` is the one speed setting to turn on, and the demo's default. Across 3 prompts it cuts MDLM from 384 forward passes to 194 and BD3LM from 328 to 137, with the same math answer and fluent text. At 0.7 MDLM breaks on the math prompt. [`index.html`](index.html) is the live demo, built only on this API.
 
 ## Pick a model
 
@@ -82,7 +82,7 @@ The q4 graphs are `onnx/model_q4f16_rtn_sym.onnx`; load them with `graphOptimiza
 ```sh
 python3 -m http.server 8791                              # serve the demo and harnesses at localhost:8791
 open http://localhost:8791/?arch=bd3lm                   # demo on a chosen model: mdlm | mdlm-q4 | bd3lm | bd3lm-q4
-open http://localhost:8791/web/bench.html?mode=diff      # diffusion step sweep + conf≥0.9 (add &arch=bd3lm)
+open http://localhost:8791/web/bench.html?mode=diff      # diffusion step sweep + conf≥0.8 (add &arch=bd3lm)
 open http://localhost:8791/web/bench.html?mode=ar        # autoregressive Qwen3-0.6B baseline, same browser
 open http://localhost:8791/web/probe.html?model=<url>    # one fixed forward on WebGPU: finite, non-zero, argmax match
 .venv/bin/python scripts/export_onnx.py --fp16           # export MDLM to ONNX + parity check (export_bd3lm.py for BD3LM)

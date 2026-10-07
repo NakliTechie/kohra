@@ -73,7 +73,7 @@ async function benchDiffusion() {
     log(`[diffusion ${label}] ${out.tokens} tok · ${out.forwards} fwd · ${out.seconds.toFixed(1)}s · ${out.tokensPerSecond.toFixed(1)} tok/s\n  ${out.text.slice(0, 160).replace(/\n/g, ' ')}`, 'ok');
   };
   for (const steps of [128, 64, 32]) await run(`parallel, ${steps} steps`, { steps });
-  await run('conf≥0.9, 128 steps', { steps: 128, threshold: 0.9 });   // Fast-dLLM threshold decoding
+  await run('conf≥0.8, 128 steps', { steps: 128, threshold: 0.8 });   // Fast-dLLM threshold decoding
 }
 
 function renderTable() {

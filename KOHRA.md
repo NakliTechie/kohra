@@ -38,6 +38,18 @@ Same Qwen3-0.6B lineage, same browser/WebGPU, fp16: **AR** ([onnx-community/Qwen
 
 **Fast-dLLM confidence-threshold decoding** (`generate({threshold: 0.9})`, or the `conf≥` field in the demo): instead of revealing a fixed count per step, unmask *every* position above a confidence bar. Measured: **128→61 forwards, ~2× faster, byte-identical output** on the math prompt — a free speedup when the model is confident.
 
+**Threshold sweep, 2026-10-07** (ORT-web 1.30.0, fp16, 128 steps, 3 prompts; forward passes summed over the prompts):
+
+| threshold | MDLM fwd | BD3LM fwd | text |
+|---|---|---|---|
+| off (fixed 128 steps) | 384 | 328 | baseline |
+| 0.95 | 252 | 174 | same answers |
+| 0.9 | 229 | 155 | same answers |
+| **0.8** | **194** | **137** | MDLM text identical to fixed-step on 2 of 3 prompts; BD3LM identical to 0.9 |
+| 0.7 | 172 | 113 | MDLM breaks on the math prompt ("48 * 8 = 38 km km") |
+
+0.8 is the demo default for both models.
+
 **Tried and dropped: S2PD serial→parallel decoding** ([arXiv:2610.06847](https://arxiv.org/abs/2610.06847)) — denoise each block left-to-right down to a masked fraction τ, then finish the whole canvas in parallel. Measured 2026-10-07 on both fp16 graphs, 3 prompts: it cuts forwards linearly (MDLM 128→71 at τ 0.6) but doubles adjacent tokens from τ 0.2 on ("is is", "than than"), and BD3LM output collapses from τ 0.4. Threshold decoding gets fewer forwards (61) with unchanged text, and combining the two is worse than either (88). The paper's gain comes from batching amortising weight reads; with no KV cache every kohra forward is already full-canvas, so the only lever is tokens revealed per forward — which the threshold already pulls adaptively.
 
 **Takeaways.** (1) Diffusion cost is **linear in steps** — halving steps doubles throughput (128→64→32 ⇒ 3.2→6.1→12.0 tok/s), and output stays coherent down to ~64 steps. Step-reduction is *the* speed lever (and threshold decoding does it adaptively, for free). (2) **At 0.6B on a laptop, AR wins**: each AR step is a width-1 matmul + KV cache; each diffusion step is a full-width forward with *no* cache (MDLM has no KV cache), so 128 steps ≈ 128 full forwards. Diffusion's parallel-denoising bet pays off at scale and on throughput-bound hardware (DiffusionGemma's 4× is measured on H100s, not a laptop 0.6B), and via step-reduction (Fast-dLLM, trajectory distillation). (3) **Caveat:** absolute tok/s drifts with GPU/session state (a fresh browser measured diffusion-128 at ~9.8 tok/s vs 3.2 late in a long session); the AR/diffusion *ratio* and the linear step-scaling are the robust results.
