@@ -174,6 +174,10 @@ Requires a WebGPU browser (Chrome/Edge 121+) over https or localhost. ~1.5 GB do
   `[1,1,T,T]` additive **block-causal** `attention_mask` (0 = attend, -1e9 = block, on the
   `pos // 32` grid). RMSNorm is fused to `SimplifiedLayerNormalization` (the WebGPU fp16 fix);
   attention stays decomposed so the 4D mask is honored.
+- `onnx/model_kv_fp16_fused.onnx` (+ `.onnx.data`) — the same fp16 weights as a **block KV-cache**
+  graph: `input_ids` + `position_ids` + `past_key_i`/`past_value_i` (28 layers) in, block `logits`
+  + `present_*` out. Load with `kvCache: true`; each step runs only the current block against a
+  cache of finished blocks. Token-identical to the plain graph, about 2× faster at 128 tokens.
 - `onnx/model_q4f16_rtn_sym.onnx` (+ `.onnx.data`) — 4-bit (RTN, symmetric) q4f16, ~680 MB.
   Coherent on WebGPU; fp16 stays the default at 0.6B (q4's dequant overhead and a small quality
   dip aren't worth it until the model is too big for fp16).
