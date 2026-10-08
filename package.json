@@ -1,5 +1,5 @@
 {
-  "name": "kohra",
+  "name": "kohra.js",
   "version": "0.1.0",
   "description": "Text-diffusion language models that generate in your browser: one JS file runs the denoising loop over ONNX Runtime Web on WebGPU.",
   "type": "module",

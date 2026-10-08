@@ -5,7 +5,7 @@ All notable changes to kohra are recorded here. The format follows
 
 ## [0.1.0] — 2026-10-08
 
-First release on npm. `kohra.js` is a single ES module for the browser; it loads
+First release on npm, as `kohra.js` (npm refused `kohra` as too close to `koa`/`ora`). `kohra.js` is a single ES module for the browser; it loads
 onnxruntime-web 1.30.0 and the tokenizer from a CDN at runtime.
 
 ### Added
