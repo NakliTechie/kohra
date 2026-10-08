@@ -178,6 +178,9 @@ Requires a WebGPU browser (Chrome/Edge 121+) over https or localhost. ~1.5 GB do
   graph: `input_ids` + `position_ids` + `past_key_i`/`past_value_i` (28 layers) in, block `logits`
   + `present_*` out. Load with `kvCache: true`; each step runs only the current block against a
   cache of finished blocks. Token-identical to the plain graph, about 2× faster at 128 tokens.
+- `onnx/model_kv_q4f16_rtn_sym.onnx` (+ `.onnx.data`) — the KV-cache graph in RTN q4f16, ~680 MB.
+  Token-identical to the plain q4 graph on WebGPU, about 2× faster; load with
+  `graphOptimizationLevel: 'all'` and `kvCache: true`.
 - `onnx/model_q4f16_rtn_sym.onnx` (+ `.onnx.data`) — 4-bit (RTN, symmetric) q4f16, ~680 MB.
   Coherent on WebGPU; fp16 stays the default at 0.6B (q4's dequant overhead and a small quality
   dip aren't worth it until the model is too big for fp16).

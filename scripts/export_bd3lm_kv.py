@@ -13,8 +13,10 @@ Stages (each checked for parity against torch on the same inputs):
   model_kv_fp32.onnx          plain export
   model_kv_fp32_fused.onnx    RMSNorm/RoPE fusion (model_type=qwen3), attention left decomposed
   model_kv_fp16_fused.onnx    fp16 weights and KV I/O; logits stay fp32
+  model_kv_q4f16_rtn_sym.onnx (--q4) RTN 4-bit MatMulNBits on the fused fp32 graph, then fp16;
+                              the same recipe as the shipped q4 graphs (optimize_onnx.py --q4)
 
-  .venv/bin/python scripts/export_bd3lm_kv.py
+  .venv/bin/python scripts/export_bd3lm_kv.py [--q4]
 """
 
 import os
@@ -149,6 +151,24 @@ def main():
           {"SimplifiedLayerNormalization", "SkipSimplifiedLayerNormalization", "RotaryEmbedding",
            "GroupQueryAttention", "MultiHeadAttention", "Attention", "Softmax"}))
     print("PARITY OK" if am > 0.9 else "PARITY LOW")
+
+    if "--q4" in sys.argv:
+        from onnxruntime.quantization import QuantFormat
+        from onnxruntime.quantization.matmul_nbits_quantizer import (
+            MatMulNBitsQuantizer, RTNWeightOnlyQuantConfig)
+        q4 = os.path.join(OUT_DIR, "model_kv_q4f16_rtn_sym.onnx")
+        if not os.path.exists(q4):
+            q = MatMulNBitsQuantizer(onnx.load(fused), block_size=32, is_symmetric=True,
+                                     quant_format=QuantFormat.QOperator,
+                                     algo_config=RTNWeightOnlyQuantConfig())
+            q.process()
+            qm = OnnxModel(q.model.model)
+            qm.convert_float_to_float16(keep_io_types=["logits"])
+            qm.save_model_to_file(q4, use_external_data_format=True)
+            print(f"saved -> {q4} ({os.path.getsize(q4 + '.data') / 1e6:.0f} MB data)")
+        # q4 on random inputs agrees less than fp16 (the shipped q4 graphs show the same);
+        # the real check is generation: gencheck_bd3lm_kv.py --model <q4> and the browser.
+        check(q4, ref, feeds, "kv-q4f16-rtn", out_names)
 
 
 if __name__ == "__main__":

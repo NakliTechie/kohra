@@ -76,7 +76,7 @@ You get two models, each in fp16 and q4. The demo's model picker switches betwee
 | [MDLM](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX) | bidirectional | default | the original masked-diffusion checkpoint |
 | [BD3LM](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX) | block-causal | `blockCausal: true` | higher scores: GSM8K 46.3 vs 29.3, HumanEval 46.3 vs 30.5; KV-cache graph ~2× faster |
 
-For BD3LM, load `onnx/model_kv_fp16_fused.onnx` with `kvCache: true`: each step then runs only the current block against a cache of finished blocks. Output is identical to the plain graph and about twice as fast. The q4 graphs are `onnx/model_q4f16_rtn_sym.onnx`; load them with `graphOptimizationLevel: 'all'`. They run on the stable onnxruntime-web 1.30.0 that `kohra.js` loads by default. q4 halves the download, and BD3LM q4 slips on arithmetic that fp16 gets right. To host your own export, serve the `.onnx` and `.onnx.data` side by side with permissive CORS. kohra finds the external-data file without configuration.
+For BD3LM, load `onnx/model_kv_fp16_fused.onnx` (or `model_kv_q4f16_rtn_sym.onnx`) with `kvCache: true`: each step then runs only the current block against a cache of finished blocks. Output is identical to the plain graph and about twice as fast. The q4 graphs are `onnx/model_q4f16_rtn_sym.onnx`; load them with `graphOptimizationLevel: 'all'`. They run on the stable onnxruntime-web 1.30.0 that `kohra.js` loads by default. q4 halves the download, and BD3LM q4 slips on arithmetic that fp16 gets right. To host your own export, serve the `.onnx` and `.onnx.data` side by side with permissive CORS. kohra finds the external-data file without configuration.
 
 ## Commands
 

@@ -125,7 +125,7 @@ const REGISTRY = {
   'mdlm':     { label: 'MDLM · fp16',                  repo: 'mdlm',  file: 'model_fp16_fused.onnx',    blockCausal: false, q4: false },
   'mdlm-q4':  { label: 'MDLM · q4 (smaller)',          repo: 'mdlm',  file: 'model_q4f16_rtn_sym.onnx', blockCausal: false, q4: true  },
   'bd3lm':    { label: 'BD3LM · fp16 · block diff',    repo: 'bd3lm', file: 'model_kv_fp16_fused.onnx', blockCausal: true,  q4: false, kvCache: true },
-  'bd3lm-q4': { label: 'BD3LM · q4 · block diff',      repo: 'bd3lm', file: 'model_q4f16_rtn_sym.onnx', blockCausal: true,  q4: true  },
+  'bd3lm-q4': { label: 'BD3LM · q4 · block diff',      repo: 'bd3lm', file: 'model_kv_q4f16_rtn_sym.onnx', blockCausal: true, q4: true, kvCache: true },
 };
 
 const params = new URLSearchParams(location.search);

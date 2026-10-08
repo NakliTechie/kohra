@@ -9,7 +9,8 @@ All notable changes to kohra are recorded here. The format follows
 - BD3LM block KV cache: `from_pretrained({ ..., kvCache: true })` with
   `onnx/model_kv_fp16_fused.onnx`. Each denoise step runs only the current block against a
   cache of finished blocks; output is token-identical to the cache-free graph and about 2×
-  faster at 128 tokens. The demo's BD3LM fp16 option uses it.
+  faster at 128 tokens. A q4 variant, `onnx/model_kv_q4f16_rtn_sym.onnx`, is token-identical to
+  the plain q4 graph and also about 2× faster. Both demo BD3LM options use the cache.
 - `scripts/export_bd3lm_kv.py`, `scripts/kv_reference.py`, `scripts/gencheck_bd3lm_kv.py`.
 - 2 KV-cache sampler tests (13 total).
 
