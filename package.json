@@ -1,8 +1,43 @@
 {
   "name": "kohra",
-  "private": true,
+  "version": "0.1.0",
+  "description": "Text-diffusion language models that generate in your browser: one JS file runs the denoising loop over ONNX Runtime Web on WebGPU.",
   "type": "module",
+  "license": "Apache-2.0",
+  "author": "Chirag Patnaik",
+  "homepage": "https://github.com/NakliTechie/kohra#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NakliTechie/kohra.git"
+  },
+  "bugs": {
+    "url": "https://github.com/NakliTechie/kohra/issues"
+  },
+  "keywords": [
+    "webgpu",
+    "onnx",
+    "onnxruntime-web",
+    "diffusion",
+    "text-diffusion",
+    "masked-diffusion",
+    "llm",
+    "browser"
+  ],
+  "files": [
+    "kohra.js",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "main": "kohra.js",
+  "browser": "kohra.js",
+  "exports": {
+    ".": "./kohra.js"
+  },
   "scripts": {
     "test": "node --import ./test/register.mjs --test --test-force-exit test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

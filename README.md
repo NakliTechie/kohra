@@ -21,7 +21,8 @@
 |---|---|
 | Try it, nothing to install | Open the [live demo](https://naklitechie.github.io/kohra) (also on [Hugging Face Spaces](https://huggingface.co/spaces/naklitechie/kohra)) |
 | Use it in your page | `cp kohra.js your-app/` from this repo |
-| Without cloning | `curl -O https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main/kohra.js` |
+| Import from a CDN | `import { pipeline } from 'https://cdn.jsdelivr.net/npm/kohra@0.1/kohra.js'` |
+| npm | `npm install kohra` |
 
 The first load pulls the model (~1.5 GB fp16, ~0.7 GB q4) and compiles WebGPU shaders. Your browser caches both, so later loads start in seconds. `kohra.js` loads onnxruntime-web from a CDN and the tokenizer from Hugging Face itself, so there is no build step. A complete page:
 
@@ -40,7 +41,7 @@ document.getElementById('go').onclick = async () => {
 </script>
 ```
 
-Serve it over https or localhost, because WebGPU needs a secure context: `python3 -m http.server 8000`. No config file and no API key. Importing `kohra.js` straight from a Hugging Face `resolve/` URL is blocked by MIME type, so copy the file.
+Serve it over https or localhost, because WebGPU needs a secure context: `python3 -m http.server 8000`. No config file and no API key. kohra imports onnxruntime-web and transformers.js from jsDelivr at runtime, so a bundler must leave those two `https:` imports external.
 
 ## Why
 
