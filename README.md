@@ -47,7 +47,7 @@ Serve it over https or localhost, because WebGPU needs a secure context: `python
 
 You want to try text diffusion, the alternative to token-by-token generation, and every runtime you reach for is autoregressive. Transformers.js, onnxruntime-web and WebLLM all ship only a left-to-right decode loop. The published diffusion models need a Python server and a datacenter GPU.
 
-kohra is the missing piece for the browser. It runs a few hundred lines of JS sampler over raw ONNX forward passes, plus ONNX exports of two small diffusion LMs that run on WebGPU. On a 121-token math answer, BD3LM with the KV cache now beats autoregressive decoding of the same 0.6B base: 3.0 s against 3.5–4.0 s. Diffusion always denoises its full canvas, so short answers still favour autoregressive decoding (benchmark in [KOHRA.md](KOHRA.md)). kohra is for running, measuring and building on diffusion in the browser, not for winning on speed today.
+kohra is the missing piece for the browser. It runs a few hundred lines of JS sampler over raw ONNX forward passes, plus ONNX exports of two small diffusion LMs that run on WebGPU. On a 121-token math answer, BD3LM with the KV cache now beats autoregressive decoding of the same 0.6B base: 3.0 s against 3.5–4.0 s. Diffusion always denoises its full canvas, so short answers still favour autoregressive decoding (benchmark in [KOHRA.md](KOHRA.md)). kohra is for running, measuring and building on text diffusion in the browser.
 
 ## Watch the fog lift
 
@@ -76,19 +76,29 @@ You get two models, each in fp16 and q4. The demo's model picker switches betwee
 | [MDLM](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX) | bidirectional | default | the original masked-diffusion checkpoint |
 | [BD3LM](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX) | block-causal | `blockCausal: true` | higher scores: GSM8K 46.3 vs 29.3, HumanEval 46.3 vs 30.5; KV-cache graph ~2× faster |
 
-For BD3LM, load `onnx/model_kv_fp16_fused.onnx` (or `model_kv_q4f16_rtn_sym.onnx`) with `kvCache: true`: each step then runs only the current block against a cache of finished blocks. Output is identical to the plain graph and about twice as fast. The q4 graphs are `onnx/model_q4f16_rtn_sym.onnx`; load them with `graphOptimizationLevel: 'all'`. They run on the stable onnxruntime-web 1.30.0 that `kohra.js` loads by default. q4 halves the download, and BD3LM q4 slips on arithmetic that fp16 gets right. To host your own export, serve the `.onnx` and `.onnx.data` side by side with permissive CORS. kohra finds the external-data file without configuration.
+For BD3LM, load the KV-cache graph. Each step then runs only the current block against a cache of finished blocks. Output is identical to the plain graph and about twice as fast:
+
+```js
+const HF = 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX/resolve/main/onnx';
+const lm = await DiffusionLM.from_pretrained({
+  model: `${HF}/model_kv_fp16_fused.onnx`,          // or model_kv_q4f16_rtn_sym.onnx + graphOptimizationLevel: 'all'
+  tokenizer: 'naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX', kvCache: true,   // cache stays on the GPU
+});
+const { text } = await lm.generate(prompt, { blockCausal: true, threshold: 0.8 });
+```
+
+The plain q4 graphs are `onnx/model_q4f16_rtn_sym.onnx`; load them with `graphOptimizationLevel: 'all'`. They run on the stable onnxruntime-web 1.30.0 that `kohra.js` loads by default. q4 halves the download, and BD3LM q4 slips on arithmetic that fp16 gets right. To host your own export, serve the `.onnx` and `.onnx.data` side by side with permissive CORS. kohra finds the external-data file without configuration.
 
 ## Commands
+
+The Python export scripts need `uv venv .venv && uv pip install --python .venv/bin/python torch "transformers==4.57.0" onnx onnxruntime onnxscript numpy huggingface_hub`, plus `git clone --depth 1 https://github.com/ZHZisZZ/dllm vendor/dllm` for the BD3LM model code.
 
 ```sh
 python3 -m http.server 8791                              # serve the demo and harnesses at localhost:8791
 open http://localhost:8791/?arch=bd3lm                   # demo on a chosen model: mdlm | mdlm-q4 | bd3lm | bd3lm-q4
-open http://localhost:8791/web/bench.html?mode=diff      # diffusion step sweep + conf≥0.8 (add &arch=bd3lm)
 open http://localhost:8791/web/bench.html?mode=ar        # autoregressive Qwen3-0.6B baseline, same browser
-open http://localhost:8791/web/probe.html?model=<url>    # one fixed forward on WebGPU: finite, non-zero, argmax match
 .venv/bin/python scripts/export_onnx.py --fp16           # export MDLM to ONNX + parity check (export_bd3lm.py for BD3LM)
 .venv/bin/python scripts/optimize_onnx.py                # fuse RMSNorm, then fp16 (required for WebGPU)
-.venv/bin/python scripts/sample_onnx.py --model <onnx>   # reference denoising loop in numpy (gencheck_bd3lm.py for BD3LM)
 .venv/bin/python scripts/export_bd3lm_kv.py              # BD3LM block KV-cache graph: export, fuse, fp16, parity at each stage
 .venv/bin/python scripts/push_to_hf.py --model mdlm --stage meta   # publish graph + tokenizer + card + kohra.js
 ```
@@ -96,12 +106,12 @@ open http://localhost:8791/web/probe.html?model=<url>    # one fixed forward on 
 ## Verify it yourself
 
 ```sh
-npm test                                                 # 11 sampler tests on a fake ONNX session (Node >= 22, no install)
+npm test                                                 # 13 sampler tests on a fake ONNX session (Node >= 22, no install)
 open http://localhost:8791/web/probe.html?model=<url>    # WebGPU logits vs the fp32 CPU ground truth
-open http://localhost:8791/web/bench.html?mode=diff      # forwards, seconds and text per configuration
+open http://localhost:8791/web/bench.html?mode=diff      # forwards, seconds and text per configuration (add &arch=bd3lm)
 ```
 
-The probe fails a graph that returns non-finite or all-zero logits on WebGPU, or whose argmax disagrees with the fp32 reference. That is how the unfused fp16 graph was caught. The bench was run end to end on 2026-10-07 for both fp16 models, and it reports every number in the [KOHRA.md](KOHRA.md) benchmark. `npm test` runs the real `kohra.js` sampler against a fake session. It fails on a wrong commit order, a broken block-causal mask, a missing EOS trim, or a loop that stops making progress.
+The probe fails a graph that returns non-finite or all-zero logits on WebGPU, or whose argmax disagrees with the fp32 reference. That is how the unfused fp16 graph was caught. The bench page produced the AR-vs-diffusion table in [KOHRA.md](KOHRA.md), re-run on 2026-10-08 in thermal state `nominal`; the threshold and KV-cache tables come from the same `kohra.js` API run in that page. `npm test` runs the real `kohra.js` sampler against a fake session. It fails on a wrong commit order, a broken block-causal mask, a missing EOS trim, or a loop that stops making progress.
 
 ## License
 
