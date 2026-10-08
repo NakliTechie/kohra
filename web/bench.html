@@ -49,7 +49,9 @@ async function benchAR() {
   const out = await gen(chatml(PROMPT), {
     max_new_tokens: MAX_NEW, do_sample: false,
     // first streamed chunk ≈ time-to-first-token
-    streamer: { put: () => { if (ttft === null) ttft = (performance.now() - t0) / 1000; }, end: () => {} },
+    // generate() calls put() first with the prompt ids, then once per new token:
+    // the second put is the first generated token.
+    streamer: { puts: 0, put() { if (++this.puts === 2) ttft = (performance.now() - t0) / 1000; }, end() {} },
   });
   const dt = (performance.now() - t0) / 1000;
   const text = (Array.isArray(out) ? out[0].generated_text : out.generated_text) ?? '';
