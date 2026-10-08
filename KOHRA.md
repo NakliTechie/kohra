@@ -27,16 +27,19 @@ Two missing pieces, built as one vertically-sliced project (they're only testabl
 
 ## Benchmark: autoregressive vs masked diffusion (same browser)
 
-Same Qwen3-0.6B lineage, same browser/WebGPU, fp16: **AR** ([onnx-community/Qwen3-0.6B-ONNX](https://huggingface.co/onnx-community/Qwen3-0.6B-ONNX) via transformers.js) vs **diffusion** (this project, fused fp16). Harness: `web/bench.html` (load `?mode=ar` and `?mode=diff` in separate fresh tabs — two ORT-web runtimes in one page contend). 128 new tokens, M-series Mac.
+Same Qwen3-0.6B lineage, same browser/WebGPU, fp16: **AR** ([onnx-community/Qwen3-0.6B-ONNX](https://huggingface.co/onnx-community/Qwen3-0.6B-ONNX) via transformers.js) vs **diffusion** (this project, fused fp16). Harness: `web/bench.html` (load `?mode=ar` and `?mode=diff` in separate fresh tabs — two ORT-web runtimes in one page contend). 128 new tokens, MacBook Pro M4 Pro (20-core GPU, 26 GB), ORT-web 1.30.0, math prompt. Re-measured 2026-10-08 with macOS thermal state `nominal` for every run.
 
 | mode | tok/s | forwards | latency | quality |
 |---|---|---|---|---|
-| **AR** (sequential + KV cache) | **27.7** | 117 | 4.2 s | coherent |
-| diffusion · 128 steps | 3.2 | 128 | 38.7 s | coherent |
-| diffusion · 64 steps | 6.1 | 64 | 20.3 s | coherent |
-| diffusion · 32 steps | 12.0 | 32 | 10.1 s | coherent (minor repetition) |
+| **AR** (sequential + KV cache) | **29.2** (33.9 on a second run) | 117 | 4.0 s | coherent |
+| diffusion · 128 steps | 10.1 | 128 | 12.2 s | coherent |
+| diffusion · 64 steps | 20.3 | 64 | 6.0 s | coherent |
+| diffusion · 32 steps | 39.1 | 32 | 3.0 s | glitches ("48 * 8  384", a stray ".") |
+| diffusion · conf≥0.8, 128 steps | 26.4 | 50 | 4.7 s | same answer as 128 steps |
 
-**Fast-dLLM confidence-threshold decoding** (`generate({threshold: 0.9})`, or the `conf≥` field in the demo): instead of revealing a fixed count per step, unmask *every* position above a confidence bar. Measured: **128→61 forwards, ~2× faster, byte-identical output** on the math prompt — a free speedup when the model is confident.
+**Thermal state decides the absolute numbers.** A forward takes 83–105 ms when macOS reports thermal state `nominal` and 217–335 ms when it reports `fair`, on the same page and build. That is the ~3 vs ~10 tok/s swing seen on 2026-10-07. Ruled out on 2026-10-08: ORT version, a hidden browser pane, `index.html` canvas rendering, and memory pressure (5 models resident, 29% free, no slowdown). `session.run` (GPU work plus the logits readback) is 10.7 s of a 12.1 s run; the JS sampler is 1.3 s. Benchmark only in `nominal`; check with `ProcessInfo.processInfo.thermalState`.
+
+**Fast-dLLM confidence-threshold decoding** (`generate({threshold: 0.8})`, or the `conf≥` field in the demo): instead of revealing a fixed count per step, unmask *every* position above a confidence bar.
 
 **Threshold sweep, 2026-10-07** (ORT-web 1.30.0, fp16, 128 steps, 3 prompts; forward passes summed over the prompts):
 
@@ -52,7 +55,7 @@ Same Qwen3-0.6B lineage, same browser/WebGPU, fp16: **AR** ([onnx-community/Qwen
 
 **Tried and dropped: S2PD serial→parallel decoding** ([arXiv:2610.06847](https://arxiv.org/abs/2610.06847)) — denoise each block left-to-right down to a masked fraction τ, then finish the whole canvas in parallel. Measured 2026-10-07 on both fp16 graphs, 3 prompts: it cuts forwards linearly (MDLM 128→71 at τ 0.6) but doubles adjacent tokens from τ 0.2 on ("is is", "than than"), and BD3LM output collapses from τ 0.4. Threshold decoding gets fewer forwards (61) with unchanged text, and combining the two is worse than either (88). The paper's gain comes from batching amortising weight reads; with no KV cache every kohra forward is already full-canvas, so the only lever is tokens revealed per forward — which the threshold already pulls adaptively.
 
-**Takeaways.** (1) Diffusion cost is **linear in steps** — halving steps doubles throughput (128→64→32 ⇒ 3.2→6.1→12.0 tok/s), and output stays coherent down to ~64 steps. Step-reduction is *the* speed lever (and threshold decoding does it adaptively, for free). (2) **At 0.6B on a laptop, AR wins**: each AR step is a width-1 matmul + KV cache; each diffusion step is a full-width forward with *no* cache (MDLM has no KV cache), so 128 steps ≈ 128 full forwards. Diffusion's parallel-denoising bet pays off at scale and on throughput-bound hardware (DiffusionGemma's 4× is measured on H100s, not a laptop 0.6B), and via step-reduction (Fast-dLLM, trajectory distillation). (3) **Caveat:** absolute tok/s drifts with GPU/session state (a fresh browser measured diffusion-128 at ~9.8 tok/s vs 3.2 late in a long session); the AR/diffusion *ratio* and the linear step-scaling are the robust results.
+**Takeaways.** (1) Diffusion cost is **linear in steps**: 128→64→32 steps gives 10.1→20.3→39.1 tok/s. Text stays clean down to 64 steps and glitches at 32. (2) **AR still wins at equal quality**: 29–34 tok/s against 26.4 for diffusion at conf≥0.8, the fastest setting with unchanged output. Each AR step is a width-1 matmul with a KV cache; each diffusion step is a full-canvas forward with no cache. Diffusion's parallel-denoising bet pays off at scale and on throughput-bound hardware (DiffusionGemma's speedup is measured on H100s) and through step reduction. (3) The 2026-06 table (diffusion-128 at 3.2 tok/s) was measured in a throttled state; the 2026-10-08 table replaces it.
 
 ## Requirements and runtime notes
 
@@ -60,7 +63,7 @@ Same Qwen3-0.6B lineage, same browser/WebGPU, fp16: **AR** ([onnx-community/Qwen
 - **Smaller (q4) build:** a 4-bit variant (`onnx/model_q4f16_rtn_sym.onnx`, ~680 MB vs fp16's ~1.5 GB) is published for **both** models and is a model-picker option. It runs on WebGPU via the RTN-quantized `MatMulNBits` path (quantizer: `RTNWeightOnlyQuantConfig`) on stable ORT-web 1.30.0, kohra.js's default since 2026-10-07 (it needed the `1.26.0-dev.20260416` build before). Pass `graphOptimizationLevel: 'all'`; the picker does. Checked 2026-10-07: MDLM q4, BD3LM q4 and MDLM fp16 all generate coherent text on 1.30.0, matching the dev build's output. Speed was not compared: tok/s in that session swung between ~3 and ~11 independent of the ORT version (a hidden browser pane throttles timers; not yet isolated). The q4-vs-fp16 speed at 0.6B was measured on the old dev build (q4 slower); on 1.30.0 it has not been compared in one fresh session yet.
 - **Hosting your own model:** any URL that serves the `.onnx` and its `.onnx.data` side-by-side with
   permissive CORS works (Hugging Face `resolve/` URLs do). kohra auto-detects the external-data file.
-- **Perf:** fused-fp16 Qwen3-0.6B-MDLM runs at **~9.8 tok/s** on an M-series Mac (128 denoise
+- **Perf:** fused-fp16 Qwen3-0.6B-MDLM runs at **~10 tok/s** on an M4 Pro in thermal state `nominal` (128 denoise
   forwards). No KV cache — cost is steps × forward, not tokens. The export recipe + WebGPU forensics
   (why fp16 needs RMSNorm fused first) are in [`reference/MDLM-algorithm.md`](reference/MDLM-algorithm.md).
 

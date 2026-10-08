@@ -46,7 +46,7 @@ Serve it over https or localhost, because WebGPU needs a secure context: `python
 
 You want to try text diffusion, the alternative to token-by-token generation, and every runtime you reach for is autoregressive. Transformers.js, onnxruntime-web and WebLLM all ship only a left-to-right decode loop. The published diffusion models need a Python server and a datacenter GPU.
 
-kohra is the missing piece for the browser. It runs a few hundred lines of JS sampler over raw ONNX forward passes, plus ONNX exports of two small diffusion LMs that run on WebGPU. At 0.6B on a laptop, autoregressive decoding is still faster (see the benchmark in [KOHRA.md](KOHRA.md)). kohra is for running, measuring and building on diffusion in the browser, not for winning on speed today.
+kohra is the missing piece for the browser. It runs a few hundred lines of JS sampler over raw ONNX forward passes, plus ONNX exports of two small diffusion LMs that run on WebGPU. At 0.6B on a laptop, autoregressive decoding is still faster at equal quality: 29–34 tok/s against 26 for kohra's best setting (benchmark in [KOHRA.md](KOHRA.md)). kohra is for running, measuring and building on diffusion in the browser, not for winning on speed today.
 
 ## Watch the fog lift
 
