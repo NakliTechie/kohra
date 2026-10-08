@@ -3,6 +3,14 @@
 All notable changes to kohra are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.2.1] — 2026-10-08
+
+Documentation only; `kohra.js` is unchanged from 0.2.0.
+
+### Fixed
+- README: a runnable BD3LM KV-cache example, the Python setup line for the export scripts,
+  the correct test count (13), and an accurate description of what the bench page measures.
+
 ## [0.2.0] — 2026-10-08
 
 ### Added
@@ -41,5 +49,6 @@ onnxruntime-web 1.30.0 and the tokenizer from a CDN at runtime.
 - The yield `MessageChannel` holds a Node ref only while a yield is pending, so the module
   neither hangs nor exits early under Node.
 
+[0.2.1]: https://github.com/NakliTechie/kohra/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/NakliTechie/kohra/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/NakliTechie/kohra/releases/tag/v0.1.0
