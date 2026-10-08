@@ -54,8 +54,11 @@ const yieldToEventLoop = (() => {
   }
   const ch = new MessageChannel();
   const queue = [];
-  ch.port1.onmessage = () => { queue.shift()?.(); };
-  return () => new Promise((resolve) => { queue.push(resolve); ch.port2.postMessage(0); });
+  // ref/unref exist only in Node: hold the port open while a yield is pending, so an
+  // idle port never keeps the process alive and a pending one never lets it exit.
+  ch.port1.onmessage = () => { queue.shift()?.(); if (!queue.length) ch.port1.unref?.(); };
+  ch.port1.unref?.();
+  return () => new Promise((resolve) => { queue.push(resolve); ch.port1.ref?.(); ch.port2.postMessage(0); });
 })();
 
 // Per-block reveal counts for the linear-alpha (MDLM) scheduler: deterministically

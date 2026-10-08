@@ -1,0 +1,8 @@
+{
+  "name": "kohra",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --import ./test/register.mjs --test --test-force-exit test/*.test.mjs"
+  }
+}

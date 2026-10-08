@@ -94,11 +94,12 @@ open http://localhost:8791/web/probe.html?model=<url>    # one fixed forward on 
 ## Verify it yourself
 
 ```sh
+npm test                                                 # 11 sampler tests on a fake ONNX session (Node >= 22, no install)
 open http://localhost:8791/web/probe.html?model=<url>    # WebGPU logits vs the fp32 CPU ground truth
 open http://localhost:8791/web/bench.html?mode=diff      # forwards, seconds and text per configuration
 ```
 
-The probe fails a graph that returns non-finite or all-zero logits on WebGPU, or whose argmax disagrees with the fp32 reference. That is how the unfused fp16 graph was caught. The bench was run end to end on 2026-10-07 for both fp16 models, and it reports every number in the [KOHRA.md](KOHRA.md) benchmark. kohra has no automated test suite yet; these two pages are the gate.
+The probe fails a graph that returns non-finite or all-zero logits on WebGPU, or whose argmax disagrees with the fp32 reference. That is how the unfused fp16 graph was caught. The bench was run end to end on 2026-10-07 for both fp16 models, and it reports every number in the [KOHRA.md](KOHRA.md) benchmark. `npm test` runs the real `kohra.js` sampler against a fake session. It fails on a wrong commit order, a broken block-causal mask, a missing EOS trim, or a loop that stops making progress.
 
 ## License
 
