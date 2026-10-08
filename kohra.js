@@ -81,6 +81,10 @@ export class DiffusionLM {
     this.ort = ort;
     this.maskId = maskId;
     this.eosId = eosId;
+    // A BD3LM KV-cache graph takes input_ids, position_ids and past_key_i/past_value_i,
+    // and returns block logits plus present_key_i/present_value_i.
+    this.pastNames = (session.inputNames ?? []).filter((n) => n.startsWith('past_'));
+    this.presentNames = this.pastNames.map((n) => n.replace('past_', 'present_'));
   }
 
   // transformers.js-style loader. `model` is a URL to the .onnx graph; external data
@@ -94,6 +98,9 @@ export class DiffusionLM {
     // The fused-fp16 graph keeps boundary casts that trip ORT-web's runtime
     // SimplifiedLayerNormFusion, so default to disabled (see reference doc).
     graphOptimizationLevel = 'disabled',
+    // KV-cache graphs (past_key_*/present_* I/O): keep outputs on the GPU so the cache
+    // never crosses to JS between blocks. Logits are then read back with getData().
+    kvCache = false,
     maskId = MASK_ID,
     eosId = EOS_ID,
   } = {}) {
@@ -104,6 +111,7 @@ export class DiffusionLM {
     const tk = await AutoTokenizer.from_pretrained(tokenizer ?? model);
 
     const opts = { executionProviders, graphOptimizationLevel };
+    if (kvCache && executionProviders.includes('webgpu')) opts.preferredOutputLocation = 'gpu-buffer';
     // External-data path must match the location string recorded inside the proto,
     // which is the file's basename + suffix.
     const base = model.split('/').pop();
@@ -175,8 +183,13 @@ export class DiffusionLM {
     // mask never changes during sampling; block-causality is what makes the cache-free
     // full-canvas forward give correct current-block logits despite still-masked future
     // blocks (a future block can't influence an earlier one).
+    // KV-cache path (BD3LM only): finished blocks never change under block-causal
+    // attention, so each step runs just the current block against a cache of the earlier
+    // ones. Exact, not approximate: scripts/gencheck_bd3lm_kv.py matches the cache-free
+    // sampler token for token in fp32.
+    const kv = cfg.blockCausal && this.pastNames.length > 0;
     let attnTensor = null;
-    if (cfg.blockCausal) {
+    if (cfg.blockCausal && !kv) {
       const m = new Float32Array(T * T);
       for (let q = 0; q < T; q++) {
         const bq = Math.floor(q / cfg.blockSize);
@@ -195,10 +208,45 @@ export class DiffusionLM {
       let n = 0; for (let i = start; i < end; i++) if (x[i] === MASK) n++; return n;
     };
 
+    // Cache helpers. `past` holds one tensor per past_* input; a run over [s, e) feeds
+    // those tokens at their absolute positions.
+    const blockFeeds = (s, e, past) => {
+      const pos = new BigInt64Array(e - s);
+      for (let i = 0; i < pos.length; i++) pos[i] = BigInt(s + i);
+      const feeds = {
+        input_ids: new ort.Tensor('int64', x.slice(s, e), [1, e - s]),
+        position_ids: new ort.Tensor('int64', pos, [1, e - s]),
+      };
+      this.pastNames.forEach((n, i) => { feeds[n] = past[i]; });
+      return feeds;
+    };
+    const extend = async (s, e, past) => {        // write [s, e) into the cache
+      const out = await this.session.run(blockFeeds(s, e, past), this.presentNames);
+      forward++;
+      for (const t of past) t.dispose?.();
+      return this.presentNames.map((n) => out[n]);
+    };
+    let past = null;
+    if (kv) {
+      const meta = (n) => this.session.inputMetadata?.find?.((m) => m.name === n);
+      past = this.pastNames.map((n) => {
+        const m = meta(n);
+        const dims = [1, Number(m?.shape?.[1] ?? 8), 0, Number(m?.shape?.[3] ?? 128)];
+        return m?.type === 'float32'
+          ? new ort.Tensor('float32', new Float32Array(0), dims)
+          : new ort.Tensor('float16', new Uint16Array(0), dims);
+      });
+      if (blocks[0][0] > 0) past = await extend(0, blocks[0][0], past);   // prefill
+    }
+
     for (let b = 0; b < numBlocks; b++) {
       const [start, end] = blocks[b];
       const nMasked = inBlockMasked(start, end);
-      if (nMasked === 0) continue;
+      const last = b === numBlocks - 1;
+      if (nMasked === 0) {
+        if (kv && !last) past = await extend(start, end, past);
+        continue;
+      }
 
       // Fixed-steps mode precomputes per-step reveal counts; threshold (Fast-dLLM) mode
       // loops until the block is clear, revealing however many clear the bar each step.
@@ -207,11 +255,20 @@ export class DiffusionLM {
 
       while (inBlockMasked(start, end) > 0) {
         if (schedule && step >= schedule.length) break;
-        const feeds = { input_ids: new ort.Tensor('int64', x.slice(), [1, T]) };
-        if (attnTensor) feeds.attention_mask = attnTensor;
-        const out = await this.session.run(feeds);
+        let out, rowBase;                      // logits row for position p is p - rowBase
+        if (kv) {
+          out = await this.session.run(blockFeeds(start, end, past), ['logits']);
+          rowBase = start;
+        } else {
+          const feeds = { input_ids: new ort.Tensor('int64', x.slice(), [1, T]) };
+          if (attnTensor) feeds.attention_mask = attnTensor;
+          out = await this.session.run(feeds);
+          rowBase = 0;
+        }
         forward++;
-        const logits = out.logits.data;       // Float32Array, [T * V] (ORT upcasts fp16)
+        const logits = out.logits.location === 'gpu-buffer'
+          ? await out.logits.getData(true)     // download, then release the GPU buffer
+          : out.logits.data;                   // Float32Array, [rows * V]
         const V = out.logits.dims[2];
 
         // Score every masked position in the current block. temperature 0 = plain argmax;
@@ -219,7 +276,7 @@ export class DiffusionLM {
         const cand = [];
         for (let p = start; p < end; p++) {
           if (x[p] !== MASK) continue;
-          const off = p * V;
+          const off = (p - rowBase) * V;
           let maxL = -Infinity;
           for (let v = 0; v < V; v++) { const l = logits[off + v]; if (l > maxL) maxL = l; }
           let best = 0, bestScore = -Infinity, sumExp = 0;
@@ -263,7 +320,11 @@ export class DiffusionLM {
           await yieldToEventLoop();
         }
       }
+      // Commit: one clean forward writes the finished block into the cache. The last
+      // block has no successor, so it skips this.
+      if (kv && !last) past = await extend(start, end, past);
     }
+    if (past) for (const t of past) t.dispose?.();
 
     const seconds = (performance.now() - t0) / 1000;
 

@@ -124,7 +124,7 @@ const TOKENIZER = {
 const REGISTRY = {
   'mdlm':     { label: 'MDLM · fp16',                  repo: 'mdlm',  file: 'model_fp16_fused.onnx',    blockCausal: false, q4: false },
   'mdlm-q4':  { label: 'MDLM · q4 (smaller)',          repo: 'mdlm',  file: 'model_q4f16_rtn_sym.onnx', blockCausal: false, q4: true  },
-  'bd3lm':    { label: 'BD3LM · fp16 · block diff',    repo: 'bd3lm', file: 'model_fp16_fused.onnx',    blockCausal: true,  q4: false },
+  'bd3lm':    { label: 'BD3LM · fp16 · block diff',    repo: 'bd3lm', file: 'model_kv_fp16_fused.onnx', blockCausal: true,  q4: false, kvCache: true },
   'bd3lm-q4': { label: 'BD3LM · q4 · block diff',      repo: 'bd3lm', file: 'model_q4f16_rtn_sym.onnx', blockCausal: true,  q4: true  },
 };
 
@@ -187,9 +187,10 @@ async function init() {
   try {
     if (!navigator.gpu) { status('This demo needs WebGPU — try Chrome/Edge 121+.', 'error'); return; }
     status(`Loading model… first run downloads ${preset.q4 ? '~0.7GB' : '~1.5GB'} + compiles WebGPU shaders (cached after).`);
-    lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: tokenizerId, ortVersion, graphOptimizationLevel });
+    lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: tokenizerId, ortVersion, graphOptimizationLevel,
+                                             kvCache: !modelOverride && !!preset.kvCache });
     window.kohra = lm; // handy for the console / preview probing
-    status(`Ready — ${preset.q4 ? 'q4f16' : 'fused fp16'} Qwen3-0.6B-${blockCausal ? 'BD3LM (block diffusion)' : 'MDLM'} on WebGPU. Press Generate.`, 'ready');
+    status(`Ready — ${preset.q4 ? 'q4f16' : 'fused fp16'} Qwen3-0.6B-${blockCausal ? 'BD3LM (block diffusion)' : 'MDLM'}${lm.pastNames.length ? ' + KV cache' : ''} on WebGPU. Press Generate.`, 'ready');
     $('go').disabled = false;
   } catch (e) {
     console.error(e);

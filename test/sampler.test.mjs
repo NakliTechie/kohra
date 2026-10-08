@@ -140,3 +140,63 @@ test('the prompt is never overwritten', async () => {
     assert.deepEqual([...out.x.slice(0, PROMPT.length)].map(Number), PROMPT);
   }
 });
+
+// ---- BD3LM block KV cache -------------------------------------------------------------
+// Fake cache graph: logits for the fed block only, computed from position_ids (so a correct
+// cache path reproduces the cache-free output exactly); presents are past + block long.
+const LAYERS = 2;
+function fakeKvSession() {
+  const calls = [];
+  const pastNames = [], presentNames = [];
+  for (let i = 0; i < LAYERS; i++) {
+    pastNames.push(`past_key_${i}`, `past_value_${i}`);
+    presentNames.push(`present_key_${i}`, `present_value_${i}`);
+  }
+  return {
+    calls,
+    inputNames: ['input_ids', 'position_ids', ...pastNames],
+    async run(feeds, fetches) {
+      const L = feeds.input_ids.dims[1];
+      const pos = [...feeds.position_ids.data].map(Number);
+      const pastLen = feeds.past_key_0.dims[2];
+      calls.push({ start: pos[0], L, pastLen, fetches: [...fetches] });
+      const out = {};
+      if (fetches.includes('logits')) {
+        const data = new Float32Array(L * V);
+        pos.forEach((p, i) => { data[i * V + want(p)] = sureness(p); });
+        out.logits = { data, dims: [1, L, V] };
+      }
+      for (const n of presentNames) if (fetches.includes(n)) out[n] = { dims: [1, 8, pastLen + L, 128] };
+      return out;
+    },
+  };
+}
+
+test('KV cache: same tokens as the cache-free path, with or without a prompt prefill', async () => {
+  for (const prompt of [PROMPT, Array.from({ length: 40 }, (_, i) => i % 20)]) {
+    for (const threshold of [null, 0.8]) {
+      const base = await model(fakeSession()).generate(prompt, { maxNewTokens: 96, steps: 96, blockSize: 32, blockCausal: true, threshold });
+      const s = fakeKvSession();
+      const out = await model(s).generate(prompt, { maxNewTokens: 96, steps: 96, blockSize: 32, blockCausal: true, threshold });
+      assert.deepEqual(out.tokenIds, base.tokenIds, `P ${prompt.length} threshold ${threshold}`);
+      assert.equal([...out.x].filter((t) => t === MASK).length, 0);
+    }
+  }
+});
+
+test('KV cache: prefill once, denoise against the cache, commit every block but the last', async () => {
+  const P = 40;                                   // block 0 is all prompt -> prefill [0, 32)
+  const s = fakeKvSession();
+  const out = await model(s).generate(Array.from({ length: P }, (_, i) => i % 20),
+    { maxNewTokens: 96, steps: 96, blockSize: 32, blockCausal: true });
+  const writes = s.calls.filter((c) => !c.fetches.includes('logits'));
+  const steps = s.calls.filter((c) => c.fetches.includes('logits'));
+  // physical blocks 1..4 hold generated tokens: [32,64) [64,96) [96,128) [128,136)
+  assert.deepEqual(writes.map((c) => [c.start, c.L, c.pastLen]), [[0, 32, 0], [32, 32, 32], [64, 32, 64], [96, 32, 96]]);
+  for (const c of steps) {
+    assert.equal(c.pastLen, c.start, 'a step sees exactly the blocks before it');
+    assert.ok(c.L <= 32);
+  }
+  assert.equal(out.forwards, s.calls.length);
+  assert.ok(writes.every((c) => c.fetches.every((f) => f.startsWith('present_'))), 'writes fetch only the cache');
+});

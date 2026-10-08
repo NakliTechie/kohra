@@ -3,6 +3,19 @@
 All notable changes to kohra are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- BD3LM block KV cache: `from_pretrained({ ..., kvCache: true })` with
+  `onnx/model_kv_fp16_fused.onnx`. Each denoise step runs only the current block against a
+  cache of finished blocks; output is token-identical to the cache-free graph and about 2×
+  faster at 128 tokens. The demo's BD3LM fp16 option uses it.
+- `scripts/export_bd3lm_kv.py`, `scripts/kv_reference.py`, `scripts/gencheck_bd3lm_kv.py`.
+- 2 KV-cache sampler tests (13 total).
+
+### Fixed
+- bench.html: TTFT now times the first generated token, not transformers.js's prompt echo.
+
 ## [0.1.0] — 2026-10-08
 
 First release on npm, as `kohra.js` (npm refused `kohra` as too close to `koa`/`ora`). `kohra.js` is a single ES module for the browser; it loads

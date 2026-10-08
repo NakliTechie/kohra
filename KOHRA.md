@@ -55,6 +55,19 @@ Same Qwen3-0.6B lineage, same browser/WebGPU, fp16: **AR** ([onnx-community/Qwen
 
 **Tried and dropped: S2PD serial→parallel decoding** ([arXiv:2610.06847](https://arxiv.org/abs/2610.06847)) — denoise each block left-to-right down to a masked fraction τ, then finish the whole canvas in parallel. Measured 2026-10-07 on both fp16 graphs, 3 prompts: it cuts forwards linearly (MDLM 128→71 at τ 0.6) but doubles adjacent tokens from τ 0.2 on ("is is", "than than"), and BD3LM output collapses from τ 0.4. Threshold decoding gets fewer forwards (61) with unchanged text, and combining the two is worse than either (88). The paper's gain comes from batching amortising weight reads; with no KV cache every kohra forward is already full-canvas, so the only lever is tokens revealed per forward — which the threshold already pulls adaptively.
 
+**BD3LM block KV cache, 2026-10-08** (fp16, WebGPU, 128 tokens, thermal `nominal`, same output as without the cache on all 6 runs):
+
+| decoding | prompt | no cache | KV cache | speedup |
+|---|---|---|---|---|
+| 128 steps | math | 108 fwd · 11.27 s | 112 fwd · 6.16 s | 1.83× |
+| 128 steps | sky | 110 fwd · 11.04 s | 114 fwd · 6.12 s | 1.80× |
+| 128 steps | poem | 110 fwd · 12.76 s | 114 fwd · 6.21 s | 2.05× |
+| conf≥0.8 | math | 51 fwd · 9.27 s | 55 fwd · 3.00 s | 3.09× (slow baseline run) |
+| conf≥0.8 | sky | 50 fwd · 4.87 s | 54 fwd · 2.85 s | 1.71× |
+| conf≥0.8 | poem | 36 fwd · 3.38 s | 40 fwd · 2.03 s | 1.67× |
+
+The cache adds one commit forward per finished block (4 here) and still halves wall time.
+
 **Takeaways.** (1) Diffusion cost is **linear in steps**: 128→64→32 steps gives 10.1→20.3→39.1 tok/s. Text stays clean down to 64 steps and glitches at 32. (2) **AR still wins at equal quality**: 29–34 tok/s against 26.4 for diffusion at conf≥0.8, the fastest setting with unchanged output. Each AR step is a width-1 matmul with a KV cache; each diffusion step is a full-canvas forward with no cache. Diffusion's parallel-denoising bet pays off at scale and on throughput-bound hardware (DiffusionGemma's speedup is measured on H100s) and through step reduction. (3) The 2026-06 table (diffusion-128 at 3.2 tok/s) was measured in a throttled state; the 2026-10-08 table replaces it.
 
 ## Requirements and runtime notes
@@ -73,7 +86,7 @@ Same Qwen3-0.6B lineage, same browser/WebGPU, fp16: **AR** ([onnx-community/Qwen
 - **fp16 on WebGPU needs the RMSNorm fused first.** A decomposed `Pow(x,2)` RMSNorm overflows native fp16 on WebGPU → silent all-zero logits (CPU/wasm reduce in fp32 and hide it). Fix: ORT's offline transformer optimizer (`model_type=qwen3`) fuses it to `SimplifiedLayerNormalization` before fp16-convert. See `reference/MDLM-algorithm.md`.
 - **Dense q4 (`MatMulNBits`) on WebGPU needs RTN packing + a newer ORT-web.** `DefaultWeightOnlyQuantConfig` decodes correctly on CPU but yields sane-magnitude-but-wrong logits on WebGPU (every sym/asym/opt-level/scale-dtype variant). The fix: `RTNWeightOnlyQuantConfig` (the genai / neural-compressor RTN path) packs weights the way ORT-web's WebGPU kernel expects → coherent generation, on ORT-web ≥ `1.26.0-dev.20260416`, and on stable 1.30.0. It was the weight packing, not a kernel bug. fp16 stays the 0.6B default; q4 is for the smaller download and for models too big for fp16.
 - **Transformers.js `generate()` is AR-only** — bypass it; call the model's forward directly (or use a raw ORT-web session).
-- **MDLM has no KV cache** (bidirectional attention, full forward per denoise step) — the perf profile is steps × block-length, not tokens. BD3LM's architecture supports block-level KV caching, but kohra runs it **cache-free** in the browser (a static block-causal mask + full forward), since the loop-free ONNX export has no cache state to thread.
+- **MDLM has no KV cache** (bidirectional attention, full forward per denoise step) — the perf profile is steps × canvas, not tokens. **BD3LM has an exact block KV cache** (2026-10-08): block-causal attention means a finished block's keys/values never change, so `onnx/model_kv_fp16_fused.onnx` denoises only the current block against a cache of earlier ones (`past_key_i`/`present_key_i` I/O, positions fed explicitly, attention left decomposed because GQA contrib ops are causal). One commit pass per finished block writes it into the cache. Token-identical to the cache-free graph in the browser (6/6 runs), 1.7–2.1× faster at 128 tokens; the gain grows with output length. Export: `scripts/export_bd3lm_kv.py`; checks: `scripts/kv_reference.py` (torch) and `scripts/gencheck_bd3lm_kv.py` (ONNX vs torch, 128/128 ids in fp32).
 - **Watch item:** if Transformers.js ships native diffusion-loop support, fold into it rather than compete.
 
 ## Reference code

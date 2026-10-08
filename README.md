@@ -47,7 +47,7 @@ Serve it over https or localhost, because WebGPU needs a secure context: `python
 
 You want to try text diffusion, the alternative to token-by-token generation, and every runtime you reach for is autoregressive. Transformers.js, onnxruntime-web and WebLLM all ship only a left-to-right decode loop. The published diffusion models need a Python server and a datacenter GPU.
 
-kohra is the missing piece for the browser. It runs a few hundred lines of JS sampler over raw ONNX forward passes, plus ONNX exports of two small diffusion LMs that run on WebGPU. At 0.6B on a laptop, autoregressive decoding is still faster at equal quality: 29–34 tok/s against 26 for kohra's best setting (benchmark in [KOHRA.md](KOHRA.md)). kohra is for running, measuring and building on diffusion in the browser, not for winning on speed today.
+kohra is the missing piece for the browser. It runs a few hundred lines of JS sampler over raw ONNX forward passes, plus ONNX exports of two small diffusion LMs that run on WebGPU. On a 121-token math answer, BD3LM with the KV cache now beats autoregressive decoding of the same 0.6B base: 3.0 s against 3.5–4.0 s. Diffusion always denoises its full canvas, so short answers still favour autoregressive decoding (benchmark in [KOHRA.md](KOHRA.md)). kohra is for running, measuring and building on diffusion in the browser, not for winning on speed today.
 
 ## Watch the fog lift
 
@@ -74,9 +74,9 @@ You get two models, each in fp16 and q4. The demo's model picker switches betwee
 | Model | Attention | Call with | Notes |
 |---|---|---|---|
 | [MDLM](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX) | bidirectional | default | the original masked-diffusion checkpoint |
-| [BD3LM](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX) | block-causal | `blockCausal: true` | higher scores: GSM8K 46.3 vs 29.3, HumanEval 46.3 vs 30.5 |
+| [BD3LM](https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX) | block-causal | `blockCausal: true` | higher scores: GSM8K 46.3 vs 29.3, HumanEval 46.3 vs 30.5; KV-cache graph ~2× faster |
 
-The q4 graphs are `onnx/model_q4f16_rtn_sym.onnx`; load them with `graphOptimizationLevel: 'all'`. They run on the stable onnxruntime-web 1.30.0 that `kohra.js` loads by default. q4 halves the download, and BD3LM q4 slips on arithmetic that fp16 gets right. To host your own export, serve the `.onnx` and `.onnx.data` side by side with permissive CORS. kohra finds the external-data file without configuration.
+For BD3LM, load `onnx/model_kv_fp16_fused.onnx` with `kvCache: true`: each step then runs only the current block against a cache of finished blocks. Output is identical to the plain graph and about twice as fast. The q4 graphs are `onnx/model_q4f16_rtn_sym.onnx`; load them with `graphOptimizationLevel: 'all'`. They run on the stable onnxruntime-web 1.30.0 that `kohra.js` loads by default. q4 halves the download, and BD3LM q4 slips on arithmetic that fp16 gets right. To host your own export, serve the `.onnx` and `.onnx.data` side by side with permissive CORS. kohra finds the external-data file without configuration.
 
 ## Commands
 
@@ -89,6 +89,7 @@ open http://localhost:8791/web/probe.html?model=<url>    # one fixed forward on 
 .venv/bin/python scripts/export_onnx.py --fp16           # export MDLM to ONNX + parity check (export_bd3lm.py for BD3LM)
 .venv/bin/python scripts/optimize_onnx.py                # fuse RMSNorm, then fp16 (required for WebGPU)
 .venv/bin/python scripts/sample_onnx.py --model <onnx>   # reference denoising loop in numpy (gencheck_bd3lm.py for BD3LM)
+.venv/bin/python scripts/export_bd3lm_kv.py              # BD3LM block KV-cache graph: export, fuse, fp16, parity at each stage
 .venv/bin/python scripts/push_to_hf.py --model mdlm --stage meta   # publish graph + tokenizer + card + kohra.js
 ```
 
