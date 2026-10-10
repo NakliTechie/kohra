@@ -23,3 +23,6 @@ node_modules/
 *.onnx
 *.onnx_data
 models/
+# Promo output (regenerable; /windup-nt sweeps it)
+/marketing
+/brag-output*
