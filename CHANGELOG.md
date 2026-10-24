@@ -3,6 +3,20 @@
 All notable changes to kohra are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.3.0] — 2026-10-24
+
+### Added
+- Nemotron-Labs-Diffusion-3B support: a "seeded" block-KV graph takes an additive
+  `attention_mask` input, so one graph both denoises a block (no mask) and commits it to the
+  cache (causal mask); the commit's last logit seeds the next block's first token. kohra.js
+  detects such a graph and stops after a block that contains EOS.
+- `chatFormat` option on `from_pretrained` to wrap prompts in a model's chat template.
+- Multi-file external data: `<model>.onnx_data`, `_data_1`, … are found and loaded.
+- Demo picker entry "Nemotron 3B · q4 · large (2.7 GB)" (`?arch=nemotron-q4`), loading
+  `naklitechie/Nemotron-Labs-Diffusion-3B-ONNX` from Hugging Face.
+- `scripts/export_nemotron_kv.py` (fp16 export, q4 RTN), `scripts/gencheck_nemotron.py`,
+  `scripts/push_nemotron_hf.py`, `web/nemotron.html`; NVIDIA licence in `reference/nemotron/`.
+
 ## [0.2.1] — 2026-10-08
 
 Documentation only; `kohra.js` is unchanged from 0.2.0.
