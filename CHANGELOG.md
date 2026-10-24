@@ -3,6 +3,16 @@
 All notable changes to kohra are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.3.1] — 2026-10-24
+
+### Added
+- `from_pretrained({ progress_callback })`: transformers.js-style `initiate` / `progress` /
+  `done` events for each graph file while it downloads.
+- Graph files are kept in Cache Storage `kohra-models` (`cacheName` option; `null` turns it
+  off), so a reload reads them from disk. Nemotron 3B: first load downloads 2.7 GB, a reload
+  is ready in about 7 s with no download.
+- `fetchCached(url, { cache, progress_callback })` is exported; 4 download tests (17 total).
+
 ## [0.3.0] — 2026-10-24
 
 ### Added
