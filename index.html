@@ -75,6 +75,7 @@
       <option value="mdlm-q4">MDLM · q4</option>
       <option value="bd3lm">BD3LM · fp16 · block diffusion</option>
       <option value="bd3lm-q4">BD3LM · q4 · block diffusion</option>
+      <option value="nemotron-q4">Nemotron 3B · q4 · large (2.7 GB)</option>
     </select></label>
     <label>new tokens <input id="maxNew" type="number" value="128" step="32" min="16"></label>
     <label>steps <input id="steps" type="number" value="128" step="16" min="4"></label>
@@ -116,16 +117,25 @@ const status = (t, state = 'loading') => {
 const REPO = {
   mdlm:  'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX/resolve/main',
   bd3lm: 'https://huggingface.co/naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX/resolve/main',
+  nemotron: 'https://huggingface.co/naklitechie/Nemotron-Labs-Diffusion-3B-ONNX/resolve/main',
 };
 const TOKENIZER = {
   mdlm:  'naklitechie/Qwen3-0.6B-diffusion-mdlm-ONNX',
   bd3lm: 'naklitechie/Qwen3-0.6B-diffusion-bd3lm-ONNX',
+  nemotron: 'naklitechie/Nemotron-Labs-Diffusion-3B-ONNX',
 };
+// Nemotron's chat template for one user turn, as rendered by its tokenizer in Python.
+const nemotronChat = (t) =>
+  `<|im_start|>system\n<|im_end|>\n<|im_start|>user\n${t}<|im_end|>\n<|im_start|>assistant\n<think></think>`;
 const REGISTRY = {
   'mdlm':     { label: 'MDLM · fp16',                  repo: 'mdlm',  file: 'model_fp16_fused.onnx',    blockCausal: false, q4: false },
   'mdlm-q4':  { label: 'MDLM · q4 (smaller)',          repo: 'mdlm',  file: 'model_q4f16_rtn_sym.onnx', blockCausal: false, q4: true  },
   'bd3lm':    { label: 'BD3LM · fp16 · block diff',    repo: 'bd3lm', file: 'model_kv_fp16_fused.onnx', blockCausal: true,  q4: false, kvCache: true },
   'bd3lm-q4': { label: 'BD3LM · q4 · block diff',      repo: 'bd3lm', file: 'model_kv_q4f16_rtn_sym.onnx', blockCausal: true, q4: true, kvCache: true },
+  // Nemotron-Labs-Diffusion-3B: a seeded block-KV graph (kohra.js detects its attention_mask input).
+  'nemotron-q4': { label: 'Nemotron 3B · q4 · large', repo: 'nemotron', file: 'model_kv_q4f16.onnx', blockCausal: false,
+                   q4: true, kvCache: true, opt: 'disabled', size: '~2.7GB', name: 'Nemotron-Labs-Diffusion-3B',
+                   maskId: 100n, eosId: 11n, chatFormat: nemotronChat },
 };
 
 const params = new URLSearchParams(location.search);
@@ -137,7 +147,7 @@ const modelUrl = modelOverride ?? `${REPO[preset.repo]}/onnx/${preset.file}`;
 const tokenizerId = params.get('tokenizer') ?? TOKENIZER[preset.repo];
 const blockCausal = preset.blockCausal;
 const ortVersion = params.get('ort') || undefined;           // default: kohra.js's pinned stable build
-const graphOptimizationLevel = params.get('opt') || (preset.q4 ? 'all' : 'disabled');
+const graphOptimizationLevel = params.get('opt') || preset.opt || (preset.q4 ? 'all' : 'disabled');
 
 let lm;
 
@@ -186,11 +196,13 @@ async function generate() {
 async function init() {
   try {
     if (!navigator.gpu) { status('This demo needs WebGPU — try Chrome/Edge 121+.', 'error'); return; }
-    status(`Loading model… first run downloads ${preset.q4 ? '~0.7GB' : '~1.5GB'} + compiles WebGPU shaders (cached after).`);
+    status(`Loading model… first run downloads ${preset.size ?? (preset.q4 ? '~0.7GB' : '~1.5GB')} + compiles WebGPU shaders (cached after).`);
+    const ids = preset.maskId ? { maskId: preset.maskId, eosId: preset.eosId, chatFormat: preset.chatFormat } : {};
     lm = await DiffusionLM.from_pretrained({ model: modelUrl, tokenizer: tokenizerId, ortVersion, graphOptimizationLevel,
-                                             kvCache: !modelOverride && !!preset.kvCache });
+                                             kvCache: !modelOverride && !!preset.kvCache, ...ids });
     window.kohra = lm; // handy for the console / preview probing
-    status(`Ready — ${preset.q4 ? 'q4f16' : 'fused fp16'} Qwen3-0.6B-${blockCausal ? 'BD3LM (block diffusion)' : 'MDLM'}${lm.pastNames.length ? ' + KV cache' : ''} on WebGPU. Press Generate.`, 'ready');
+    const name = preset.name ?? `Qwen3-0.6B-${blockCausal ? 'BD3LM (block diffusion)' : 'MDLM'}`;
+    status(`Ready — ${preset.q4 ? 'q4f16' : 'fused fp16'} ${name}${lm.pastNames.length ? ' + KV cache' : ''} on WebGPU. Press Generate.`, 'ready');
     $('go').disabled = false;
   } catch (e) {
     console.error(e);
