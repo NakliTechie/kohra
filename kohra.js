@@ -22,6 +22,55 @@
 import * as ortDefault from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.webgpu.min.mjs';
 import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm';
 
+// Cache Storage name for downloaded graph files (from_pretrained's `cacheName`).
+export const CACHE_NAME = 'kohra-models';
+
+// Fetch `url` as bytes. With a Cache Storage `cache`, a hit is read from disk and a miss is
+// stored there after download. Reports transformers.js-style progress events either way.
+export async function fetchCached(url, { cache = null, progress_callback = null } = {}) {
+  const file = url.split('/').pop();
+  const emit = (e) => progress_callback?.({ file, name: url, ...e });
+  emit({ status: 'initiate' });
+  let res = cache ? await cache.match(url) : null;
+  const hit = !!res;
+  if (!res) {
+    res = await fetch(url);
+    if (!res.ok) throw new Error(`kohra: ${res.status} fetching ${url}`);
+  }
+  const total = Number(res.headers.get('content-length')) || 0;
+  // Write straight into one buffer when the size is known (2 GB files: no second copy);
+  // otherwise, or once more bytes arrive than announced, collect chunks and join at the end.
+  const bytes = new Uint8Array(total);
+  const chunks = [];
+  let loaded = 0, filled = 0;
+  let body = res.body, stored = null;
+  if (cache && !hit) {      // one branch to Cache Storage, one read here; no second copy
+    const [mine, theirs] = body.tee();
+    body = mine;
+    stored = cache.put(url, new Response(theirs, total ? { headers: { 'content-length': String(total) } } : {}))
+      .catch(() => {});     // quota full: the model still loads, it just downloads again next time
+  }
+  const reader = body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!chunks.length && filled + value.length <= total) { bytes.set(value, filled); filled += value.length; }
+    else chunks.push(value);
+    loaded += value.length;
+    emit({ status: 'progress', loaded, total, progress: total ? Math.min(100, (100 * loaded) / total) : 0 });
+  }
+  let out = bytes;
+  if (loaded !== total) {
+    out = new Uint8Array(loaded);
+    out.set(bytes.subarray(0, filled), 0);
+    let o = filled;
+    for (const c of chunks) { out.set(c, o); o += c.length; }
+  }
+  await stored;
+  emit({ status: 'done', loaded, total: loaded });
+  return out;
+}
+
 // Tiny-A2D Qwen3-0.6B MDLM token ids (tokenizer.mask_token_id / <|im_end|>).
 export const MASK_ID = 151669n;
 export const EOS_ID = 151645n;
@@ -108,6 +157,12 @@ export class DiffusionLM {
     maskId = MASK_ID,
     eosId = EOS_ID,
     chatFormat = null,         // (text) => prompt string; null = Qwen3 ChatML
+    // transformers.js-style progress events while the graph files download:
+    // { status: 'initiate' | 'progress' | 'done', file, loaded, total, progress }.
+    progress_callback = null,
+    // Cache Storage name for the graph files, so a reload reads them from disk instead of
+    // downloading again. null = no Cache Storage (the browser's HTTP cache only).
+    cacheName = CACHE_NAME,
   } = {}) {
     if (!model) throw new Error('kohra: `model` URL is required');
     if (!ort) ort = ortVersion
@@ -117,23 +172,31 @@ export class DiffusionLM {
 
     const opts = { executionProviders, graphOptimizationLevel };
     if (kvCache && executionProviders.includes('webgpu')) opts.preferredOutputLocation = 'gpu-buffer';
+    const cache = cacheName && globalThis.caches ? await caches.open(cacheName) : null;
     // External-data path must match the location string recorded inside the proto,
     // which is the file's basename + suffix.
     const base = model.split('/').pop();
     // Large graphs split their data into <name>_data, <name>_data_1, … (≤ 2 GB each).
     const exists = async (url) => {
+      if (cache && await cache.match(url)) return true;
       try { return (await fetch(url, { method: 'HEAD' })).ok; } catch { return false; }
     };
+    const files = [];                 // [path recorded in the proto, url]
     for (const suffix of ['.data', '_data']) {
       if (!(await exists(model + suffix))) continue;
-      opts.externalData = [{ path: base + suffix, data: model + suffix }];
+      files.push([base + suffix, model + suffix]);
       for (let i = 1; await exists(`${model}${suffix}_${i}`); i++) {
-        opts.externalData.push({ path: `${base}${suffix}_${i}`, data: `${model}${suffix}_${i}` });
+        files.push([`${base}${suffix}_${i}`, `${model}${suffix}_${i}`]);
       }
       break;
     }
 
-    const session = await ort.InferenceSession.create(model, opts);
+    const get = (url) => fetchCached(url, { cache, progress_callback });
+    if (files.length) {
+      opts.externalData = [];
+      for (const [path, url] of files) opts.externalData.push({ path, data: await get(url) });
+    }
+    const session = await ort.InferenceSession.create(await get(model), opts);
     return new DiffusionLM({ session, tokenizer: tk, ort, maskId, eosId, chatFormat });
   }
 
