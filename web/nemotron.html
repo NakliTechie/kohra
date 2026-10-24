@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kohra Nemotron 3B check</title>
+<style>
+  body { background:#f7f6f3; color:#1d1d1f; font:14px/1.6 ui-monospace, Menlo, monospace; margin:24px; max-width:860px; }
+  pre { background:#fff; border:1px solid #ddd; border-radius:8px; padding:14px; white-space:pre-wrap; word-break:break-word; }
+</style>
+</head>
+<body>
+<h3>Nemotron-Labs-Diffusion-3B through kohra.js (seeded KV graph, WebGPU)</h3>
+<pre id="out">starting…</pre>
+<script type="module">
+// Loads the q4f16 (or ?graph=fp16) block-KV graph, checks prompt tokenization against Python,
+// and generates the three gencheck_nemotron.py prompts, fixed steps and threshold 0.9.
+// Results land in window.__result for the harness to read.
+import { DiffusionLM } from '../kohra.js';
+import { env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm';
+
+// Tokenizer from the local checkpoint (models/nemotron-tokenizer links to it), not the network.
+env.allowLocalModels = true;
+env.allowRemoteModels = false;
+env.localModelPath = '/models/';
+
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += `\n${s}`; };
+const p = new URLSearchParams(location.search);
+const graph = p.get('graph') ?? 'q4f16';
+const MODEL = `../models/nemotron-labs-diffusion-3b-onnx/model_kv_${graph}.onnx`;
+const chatFormat = (t) =>
+  `<|im_start|>system\n<|im_end|>\n<|im_start|>user\n${t}<|im_end|>\n<|im_start|>assistant\n<think></think>`;
+const PROMPTS = [
+  'Lily can run 12 kilometers per hour for 4 hours. After that, she runs 6 kilometers per hour. ' +
+    'How many kilometers can she run in 8 hours?',
+  'Write one short paragraph explaining why the sky is blue.',
+  'List three prime numbers greater than 50.',
+];
+// scripts: Python tokenizer ids for chatFormat(PROMPTS[2])
+const PY_IDS = [10, 25708, 1010, 11, 1010, 10, 3263, 1010, 2525, 3300, 8156, 8091, 7607, 2224, 1032,
+  1053, 1048, 1046, 11, 1010, 10, 1503, 19464, 1010, 12, 13];
+
+const result = { graph, runs: [] };
+window.__result = result;
+try {
+  const t0 = performance.now();
+  const lm = await DiffusionLM.from_pretrained({
+    model: MODEL, tokenizer: 'nemotron-tokenizer', kvCache: true,
+    maskId: 100n, eosId: 11n, chatFormat,
+  });
+  result.loadSeconds = +((performance.now() - t0) / 1000).toFixed(1);
+  log(`loaded ${graph} in ${result.loadSeconds}s; seeded=${lm.seeded}`);
+  const ids = lm.encodePrompt(PROMPTS[2]);
+  result.tokenizerMatches = JSON.stringify(ids) === JSON.stringify(PY_IDS);
+  log(`tokenizer matches Python: ${result.tokenizerMatches}`);
+
+  for (const prompt of PROMPTS) {
+    for (const threshold of [null, 0.9]) {
+      const r = await lm.generate(prompt, { maxNewTokens: 128, steps: 128, blockSize: 32, threshold });
+      const row = { prompt, threshold, forwards: r.forwards, seconds: +r.seconds.toFixed(1),
+                    tokens: r.tokens, tokenIds: r.tokenIds, text: r.text };
+      result.runs.push(row);
+      log(`\n--- threshold=${threshold} forwards=${r.forwards} ${row.seconds}s ${r.tokens} tokens\n${r.text}`);
+    }
+  }
+  result.done = true;
+} catch (e) {
+  result.error = String(e?.stack ?? e);
+  log('ERROR: ' + result.error);
+}
+</script>
+</body>
+</html>

@@ -26,3 +26,4 @@ models/
 # Promo output (regenerable; /windup-nt sweeps it)
 /marketing
 /brag-output*
+.venv*/

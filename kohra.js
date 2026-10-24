@@ -75,16 +75,20 @@ function transferSchedule(nMasked, steps) {
 }
 
 export class DiffusionLM {
-  constructor({ session, tokenizer, ort, maskId = MASK_ID, eosId = EOS_ID }) {
+  constructor({ session, tokenizer, ort, maskId = MASK_ID, eosId = EOS_ID, chatFormat = null }) {
     this.session = session;
     this.tokenizer = tokenizer;
     this.ort = ort;
     this.maskId = maskId;
     this.eosId = eosId;
+    this.chatFormat = chatFormat;
     // A BD3LM KV-cache graph takes input_ids, position_ids and past_key_i/past_value_i,
     // and returns block logits plus present_key_i/present_value_i.
     this.pastNames = (session.inputNames ?? []).filter((n) => n.startsWith('past_'));
     this.presentNames = this.pastNames.map((n) => n.replace('past_', 'present_'));
+    // A seeded KV graph (Nemotron-Labs-Diffusion) also takes attention_mask: zeros while
+    // denoising a block, causal for the commit pass, whose last logit seeds the next block.
+    this.seeded = this.pastNames.length > 0 && (session.inputNames ?? []).includes('attention_mask');
   }
 
   // transformers.js-style loader. `model` is a URL to the .onnx graph; external data
@@ -103,6 +107,7 @@ export class DiffusionLM {
     kvCache = false,
     maskId = MASK_ID,
     eosId = EOS_ID,
+    chatFormat = null,         // (text) => prompt string; null = Qwen3 ChatML
   } = {}) {
     if (!model) throw new Error('kohra: `model` URL is required');
     if (!ort) ort = ortVersion
@@ -115,26 +120,29 @@ export class DiffusionLM {
     // External-data path must match the location string recorded inside the proto,
     // which is the file's basename + suffix.
     const base = model.split('/').pop();
+    // Large graphs split their data into <name>_data, <name>_data_1, … (≤ 2 GB each).
+    const exists = async (url) => {
+      try { return (await fetch(url, { method: 'HEAD' })).ok; } catch { return false; }
+    };
     for (const suffix of ['.data', '_data']) {
-      try {
-        const dataUrl = model + suffix;
-        if ((await fetch(dataUrl, { method: 'HEAD' })).ok) {
-          opts.externalData = [{ path: base + suffix, data: dataUrl }];
-          break;
-        }
-      } catch { /* no external data at this suffix */ }
+      if (!(await exists(model + suffix))) continue;
+      opts.externalData = [{ path: base + suffix, data: model + suffix }];
+      for (let i = 1; await exists(`${model}${suffix}_${i}`); i++) {
+        opts.externalData.push({ path: `${base}${suffix}_${i}`, data: `${model}${suffix}_${i}` });
+      }
+      break;
     }
 
     const session = await ort.InferenceSession.create(model, opts);
-    return new DiffusionLM({ session, tokenizer: tk, ort, maskId, eosId });
+    return new DiffusionLM({ session, tokenizer: tk, ort, maskId, eosId, chatFormat });
   }
 
   // Build prompt token ids. transformers.js doesn't fetch chat_template.jinja for this
   // repo, so ChatML is constructed by hand (verified vs Python apply_chat_template).
   encodePrompt(text, chatTemplate = true) {
-    const s = chatTemplate
-      ? `<|im_start|>user\n${text}<|im_end|>\n<|im_start|>assistant\n`
-      : text;
+    const s = !chatTemplate ? text
+      : this.chatFormat ? this.chatFormat(text)
+      : `<|im_start|>user\n${text}<|im_end|>\n<|im_start|>assistant\n`;
     return [...this.tokenizer(s, { add_special_tokens: false }).input_ids.data].map(Number);
   }
 
@@ -164,7 +172,7 @@ export class DiffusionLM {
     // denoise from the physical block containing P — its prompt prefix is fixed, its
     // masked tail is the first generated tokens (bidirectional within that block).
     const blocks = [];
-    if (cfg.blockCausal) {
+    if (cfg.blockCausal && !this.seeded) {
       for (let blk = Math.floor(P / cfg.blockSize); blk * cfg.blockSize < T; blk++) {
         blocks.push([blk * cfg.blockSize, Math.min((blk + 1) * cfg.blockSize, T)]);
       }
@@ -187,7 +195,8 @@ export class DiffusionLM {
     // attention, so each step runs just the current block against a cache of the earlier
     // ones. Exact, not approximate: scripts/gencheck_bd3lm_kv.py matches the cache-free
     // sampler token for token in fp32.
-    const kv = cfg.blockCausal && this.pastNames.length > 0;
+    // Seeded graphs always run the KV path, with blocks starting at the prompt end.
+    const kv = (cfg.blockCausal || this.seeded) && this.pastNames.length > 0;
     let attnTensor = null;
     if (cfg.blockCausal && !kv) {
       const m = new Float32Array(T * T);
@@ -210,20 +219,40 @@ export class DiffusionLM {
 
     // Cache helpers. `past` holds one tensor per past_* input; a run over [s, e) feeds
     // those tokens at their absolute positions.
-    const blockFeeds = (s, e, past) => {
-      const pos = new BigInt64Array(e - s);
-      for (let i = 0; i < pos.length; i++) pos[i] = BigInt(s + i);
+    // The cache always covers [0, s), so a seeded graph's mask is [1, 1, L, s + L].
+    const blockFeeds = (s, e, past, causal = false) => {
+      const L = e - s;
+      const pos = new BigInt64Array(L);
+      for (let i = 0; i < L; i++) pos[i] = BigInt(s + i);
       const feeds = {
-        input_ids: new ort.Tensor('int64', x.slice(s, e), [1, e - s]),
-        position_ids: new ort.Tensor('int64', pos, [1, e - s]),
+        input_ids: new ort.Tensor('int64', x.slice(s, e), [1, L]),
+        position_ids: new ort.Tensor('int64', pos, [1, L]),
       };
+      if (this.seeded) {
+        const m = new Float32Array(L * e);
+        if (causal) for (let q = 0; q < L; q++) m.fill(-1e9, q * e + s + q + 1, (q + 1) * e);
+        feeds.attention_mask = new ort.Tensor('float32', m, [1, 1, L, e]);
+      }
       this.pastNames.forEach((n, i) => { feeds[n] = past[i]; });
       return feeds;
     };
-    const extend = async (s, e, past) => {        // write [s, e) into the cache
-      const out = await this.session.run(blockFeeds(s, e, past), this.presentNames);
+    // Write [s, e) into the cache. A seeded graph runs it causally and puts the argmax of
+    // its last logit at position e, the first token of the next block.
+    const extend = async (s, e, past) => {
+      const names = this.seeded ? ['logits', ...this.presentNames] : this.presentNames;
+      const out = await this.session.run(blockFeeds(s, e, past, this.seeded), names);
       forward++;
       for (const t of past) t.dispose?.();
+      if (this.seeded && e < T && x[e] === MASK) {
+        const logits = out.logits.location === 'gpu-buffer'
+          ? await out.logits.getData(true) : out.logits.data;
+        const V = out.logits.dims[2], off = (e - s - 1) * V;
+        let best = 0;
+        for (let v = 1; v < V; v++) if (logits[off + v] > logits[off + best]) best = v;
+        x[e] = BigInt(best);
+      } else if (this.seeded) {
+        out.logits.dispose?.();
+      }
       return this.presentNames.map((n) => out[n]);
     };
     let past = null;
@@ -319,6 +348,12 @@ export class DiffusionLM {
         if (cfg.yieldEvery && forward % cfg.yieldEvery === 0) {
           await yieldToEventLoop();
         }
+      }
+      // A seeded model stops once a finished block holds EOS (as upstream generate does).
+      if (this.seeded) {
+        let done = false;
+        for (let i = start; i < end; i++) if (x[i] === EOS) done = true;
+        if (done) break;
       }
       // Commit: one clean forward writes the finished block into the cache. The last
       // block has no successor, so it skips this.
