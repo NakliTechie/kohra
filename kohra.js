@@ -20,6 +20,7 @@
 // recipe (fused fp16 for WebGPU) are in reference/MDLM-algorithm.md.
 
 import * as ortDefault from 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.webgpu.min.mjs';
+import { denoise } from './denoise.js';
 import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4/+esm';
 
 // Cache Storage name for downloaded graph files (from_pretrained's `cacheName`).
@@ -92,36 +93,6 @@ const GEN_DEFAULTS = {
   onStep: null,          // ({ x, P, fresh, block, numBlocks, forward, elapsedMs }) => void
   yieldEvery: 1,         // await a frame every N forwards (keeps the UI responsive)
 };
-
-// Cooperative yield that releases the event loop so the UI can paint, WITHOUT blocking
-// on the compositor. requestAnimationFrame stalls when the tab is hidden or the
-// compositor isn't ticking (and would freeze the whole denoise loop); a MessageChannel
-// macrotask always fires and isn't background-throttled like setTimeout.
-const yieldToEventLoop = (() => {
-  if (typeof MessageChannel === 'undefined') {
-    return () => new Promise((resolve) => setTimeout(resolve, 0));
-  }
-  const ch = new MessageChannel();
-  const queue = [];
-  // ref/unref exist only in Node: hold the port open while a yield is pending, so an
-  // idle port never keeps the process alive and a pending one never lets it exit.
-  ch.port1.onmessage = () => { queue.shift()?.(); if (!queue.length) ch.port1.unref?.(); };
-  ch.port1.unref?.();
-  return () => new Promise((resolve) => { queue.push(resolve); ch.port1.ref?.(); ch.port2.postMessage(0); });
-})();
-
-// Per-block reveal counts for the linear-alpha (MDLM) scheduler: deterministically
-// round remaining/(steps-i) per step, skip zero entries. Mirrors dllm
-// get_num_transfer_tokens and scripts/sample_onnx.py.
-function transferSchedule(nMasked, steps) {
-  const ks = [];
-  let remaining = nMasked;
-  for (let i = 0; i < steps && remaining > 0; i++) {
-    const k = Math.min(Math.round(remaining / (steps - i)), remaining);
-    if (k > 0) { ks.push(k); remaining -= k; }
-  }
-  return ks;
-}
 
 export class DiffusionLM {
   constructor({ session, tokenizer, ort, maskId = MASK_ID, eosId = EOS_ID, chatFormat = null }) {
@@ -213,8 +184,9 @@ export class DiffusionLM {
     return this.tokenizer.decode(ids.map(Number), { skip_special_tokens });
   }
 
-  // Run the masked-diffusion denoising loop. `prompt` is a string or an array of token
-  // ids. Returns { text, tokenIds, tokens, forwards, seconds, tokensPerSecond, x, P }.
+  // Run the block-diffusion denoising loop (denoise.js) over this ONNX session. `prompt` is
+  // a string or an array of token ids. Returns { text, tokenIds, tokens, forwards, seconds,
+  // tokensPerSecond, x, P }.
   async generate(prompt, options = {}) {
     const cfg = { ...GEN_DEFAULTS, ...options };
     const ort = this.ort;
@@ -226,69 +198,47 @@ export class DiffusionLM {
     const P = promptIds.length;
     const T = P + cfg.maxNewTokens;
 
+    // `x` is the BigInt canvas callers see in onStep and the result; denoise.js works on
+    // its own Int32Array canvas and this mirrors it.
     const x = new BigInt64Array(T).fill(EOS);
     promptIds.forEach((t, i) => { x[i] = BigInt(t); });
     for (let i = P; i < T; i++) x[i] = MASK;
+    const sync = (canvas, s, e) => { for (let i = s; i < e; i++) x[i] = BigInt(canvas[i]); };
 
-    // Block ranges to denoise, left-to-right. MDLM: blocks start at the prompt end
-    // (P + b·blockSize). bd3lm: blocks live on the absolute pos//blockSize grid, so we
-    // denoise from the physical block containing P — its prompt prefix is fixed, its
-    // masked tail is the first generated tokens (bidirectional within that block).
-    const blocks = [];
-    if (cfg.blockCausal && !this.seeded) {
-      for (let blk = Math.floor(P / cfg.blockSize); blk * cfg.blockSize < T; blk++) {
-        blocks.push([blk * cfg.blockSize, Math.min((blk + 1) * cfg.blockSize, T)]);
-      }
-    } else {
-      const numBlocks = Math.ceil(cfg.maxNewTokens / cfg.blockSize);
-      for (let b = 0; b < numBlocks; b++) {
-        const start = P + b * cfg.blockSize;
-        blocks.push([start, Math.min(start + cfg.blockSize, T)]);
-      }
-    }
-    const numBlocks = blocks.length;
-    const stepsPerBlock = Math.ceil(cfg.steps / numBlocks);
-
-    // bd3lm's static block-causal additive mask: 0 where block(key) ≤ block(query),
-    // else -1e9. Built once and fed every forward (the graph's 2nd input, fp32). The
-    // mask never changes during sampling; block-causality is what makes the cache-free
-    // full-canvas forward give correct current-block logits despite still-masked future
-    // blocks (a future block can't influence an earlier one).
-    // KV-cache path (BD3LM only): finished blocks never change under block-causal
-    // attention, so each step runs just the current block against a cache of the earlier
-    // ones. Exact, not approximate: scripts/gencheck_bd3lm_kv.py matches the cache-free
-    // sampler token for token in fp32.
-    // Seeded graphs always run the KV path, with blocks starting at the prompt end.
+    // KV-cache path (BD3LM and seeded graphs): finished blocks never change under
+    // block-causal attention, so each preview runs just the current block against a cache
+    // of the earlier ones. Exact, not approximate: scripts/gencheck_bd3lm_kv.py matches the
+    // cache-free sampler token for token in fp32. Without a cache, every preview runs the
+    // full canvas and commits run nothing.
     const kv = (cfg.blockCausal || this.seeded) && this.pastNames.length > 0;
+    let forwards = 0;
+
+    // bd3lm cache-free: a static block-causal additive mask, 0 where block(key) ≤
+    // block(query), else -1e9. Block-causality is what makes the full-canvas forward give
+    // correct current-block logits despite still-masked future blocks.
     let attnTensor = null;
     if (cfg.blockCausal && !kv) {
       const m = new Float32Array(T * T);
       for (let q = 0; q < T; q++) {
         const bq = Math.floor(q / cfg.blockSize);
         const row = q * T;
-        for (let k = 0; k < T; k++) {
-          m[row + k] = Math.floor(k / cfg.blockSize) <= bq ? 0 : -1e9;
-        }
+        for (let k = 0; k < T; k++) m[row + k] = Math.floor(k / cfg.blockSize) <= bq ? 0 : -1e9;
       }
       attnTensor = new ort.Tensor('float32', m, [1, 1, T, T]);
     }
 
-    let forward = 0;
-    const t0 = performance.now();
+    const readLogits = async (t) => (t.location === 'gpu-buffer'
+      ? await t.getData(true)          // download, then release the GPU buffer
+      : t.data);
 
-    const inBlockMasked = (start, end) => {
-      let n = 0; for (let i = start; i < end; i++) if (x[i] === MASK) n++; return n;
-    };
-
-    // Cache helpers. `past` holds one tensor per past_* input; a run over [s, e) feeds
-    // those tokens at their absolute positions.
-    // The cache always covers [0, s), so a seeded graph's mask is [1, 1, L, s + L].
-    const blockFeeds = (s, e, past, causal = false) => {
-      const L = e - s;
+    // A run over ids at [s, s + L) against a cache covering [0, s). A seeded graph's mask
+    // is [1, 1, L, s + L]: zeros to denoise, causal to commit.
+    const blockFeeds = (s, ids, past, causal) => {
+      const L = ids.length, e = s + L;
       const pos = new BigInt64Array(L);
       for (let i = 0; i < L; i++) pos[i] = BigInt(s + i);
       const feeds = {
-        input_ids: new ort.Tensor('int64', x.slice(s, e), [1, L]),
+        input_ids: new ort.Tensor('int64', BigInt64Array.from(ids, BigInt), [1, L]),
         position_ids: new ort.Tensor('int64', pos, [1, L]),
       };
       if (this.seeded) {
@@ -299,25 +249,7 @@ export class DiffusionLM {
       this.pastNames.forEach((n, i) => { feeds[n] = past[i]; });
       return feeds;
     };
-    // Write [s, e) into the cache. A seeded graph runs it causally and puts the argmax of
-    // its last logit at position e, the first token of the next block.
-    const extend = async (s, e, past) => {
-      const names = this.seeded ? ['logits', ...this.presentNames] : this.presentNames;
-      const out = await this.session.run(blockFeeds(s, e, past, this.seeded), names);
-      forward++;
-      for (const t of past) t.dispose?.();
-      if (this.seeded && e < T && x[e] === MASK) {
-        const logits = out.logits.location === 'gpu-buffer'
-          ? await out.logits.getData(true) : out.logits.data;
-        const V = out.logits.dims[2], off = (e - s - 1) * V;
-        let best = 0;
-        for (let v = 1; v < V; v++) if (logits[off + v] > logits[off + best]) best = v;
-        x[e] = BigInt(best);
-      } else if (this.seeded) {
-        out.logits.dispose?.();
-      }
-      return this.presentNames.map((n) => out[n]);
-    };
+
     let past = null;
     if (kv) {
       const meta = (n) => this.session.inputMetadata?.find?.((m) => m.name === n);
@@ -328,108 +260,67 @@ export class DiffusionLM {
           ? new ort.Tensor('float32', new Float32Array(0), dims)
           : new ort.Tensor('float16', new Uint16Array(0), dims);
       });
-      if (blocks[0][0] > 0) past = await extend(0, blocks[0][0], past);   // prefill
     }
+    const canvasX = new BigInt64Array(T);   // cache-free path: the full canvas each preview
+    canvasX.set(x);
 
-    for (let b = 0; b < numBlocks; b++) {
-      const [start, end] = blocks[b];
-      const nMasked = inBlockMasked(start, end);
-      const last = b === numBlocks - 1;
-      if (nMasked === 0) {
-        if (kv && !last) past = await extend(start, end, past);
-        continue;
-      }
-
-      // Fixed-steps mode precomputes per-step reveal counts; threshold (Fast-dLLM) mode
-      // loops until the block is clear, revealing however many clear the bar each step.
-      const schedule = cfg.threshold == null ? transferSchedule(nMasked, stepsPerBlock) : null;
-      let step = 0;
-
-      while (inBlockMasked(start, end) > 0) {
-        if (schedule && step >= schedule.length) break;
-        let out, rowBase;                      // logits row for position p is p - rowBase
-        if (kv) {
-          out = await this.session.run(blockFeeds(start, end, past), ['logits']);
-          rowBase = start;
-        } else {
-          const feeds = { input_ids: new ort.Tensor('int64', x.slice(), [1, T]) };
-          if (attnTensor) feeds.attention_mask = attnTensor;
-          out = await this.session.run(feeds);
-          rowBase = 0;
-        }
-        forward++;
-        const logits = out.logits.location === 'gpu-buffer'
-          ? await out.logits.getData(true)     // download, then release the GPU buffer
-          : out.logits.data;                   // Float32Array, [rows * V]
+    // The forward() callback denoise.js drives (see the contract at the top of denoise.js).
+    const forward = async ({ mode, start, ids, wantLogits }) => {
+      if (!kv) {
+        for (let i = 0; i < ids.length; i++) canvasX[start + i] = BigInt(ids[i]);
+        if (mode === 'commit') return null;
+        const feeds = { input_ids: new ort.Tensor('int64', canvasX.slice(), [1, T]) };
+        if (attnTensor) feeds.attention_mask = attnTensor;
+        const out = await this.session.run(feeds);
+        forwards++;
         const V = out.logits.dims[2];
-
-        // Score every masked position in the current block. temperature 0 = plain argmax;
-        // >0 = Gumbel-max (f64). Confidence is always softmax(logits)[token].
-        const cand = [];
-        for (let p = start; p < end; p++) {
-          if (x[p] !== MASK) continue;
-          const off = (p - rowBase) * V;
-          let maxL = -Infinity;
-          for (let v = 0; v < V; v++) { const l = logits[off + v]; if (l > maxL) maxL = l; }
-          let best = 0, bestScore = -Infinity, sumExp = 0;
-          for (let v = 0; v < V; v++) {
-            const l = logits[off + v];
-            sumExp += Math.exp(l - maxL);
-            const score = cfg.temperature > 0
-              ? l - cfg.temperature * Math.log(-Math.log(Math.random() + 1e-12) + 1e-12)
-              : l;
-            if (score > bestScore) { bestScore = score; best = v; }
-          }
-          const conf = cfg.remasking === 'random'
-            ? Math.random()
-            : Math.exp(logits[off + best] - maxL) / sumExp;
-          cand.push({ p, tok: best, conf });
-        }
-
-        // Pick which positions to commit this step.
-        let commit;
-        if (cfg.threshold == null) {
-          cand.sort((a, b2) => b2.conf - a.conf);
-          commit = cand.slice(0, schedule[step]);
-        } else {
-          commit = cand.filter((c) => c.conf >= cfg.threshold);
-          if (commit.length === 0) {        // guarantee progress: take the single best
-            let top = cand[0];
-            for (const c of cand) if (c.conf > top.conf) top = c;
-            commit = [top];
-          }
-        }
-        step++;
-
-        const fresh = new Set();
-        for (const { p, tok } of commit) { x[p] = BigInt(tok); fresh.add(p); }
-
-        cfg.onStep?.({
-          x, P, fresh, block: b, numBlocks, forward,
-          elapsedMs: performance.now() - t0,
-        });
-        if (cfg.yieldEvery && forward % cfg.yieldEvery === 0) {
-          await yieldToEventLoop();
-        }
+        return (await readLogits(out.logits)).slice(start * V, (start + ids.length) * V);
       }
-      // A seeded model stops once a finished block holds EOS (as upstream generate does).
-      if (this.seeded) {
-        let done = false;
-        for (let i = start; i < end; i++) if (x[i] === EOS) done = true;
-        if (done) break;
+      if (mode === 'preview') {
+        const out = await this.session.run(blockFeeds(start, ids, past, false), ['logits']);
+        forwards++;
+        return readLogits(out.logits);
       }
-      // Commit: one clean forward writes the finished block into the cache. The last
-      // block has no successor, so it skips this.
-      if (kv && !last) past = await extend(start, end, past);
+      // Commit: write the block into the cache. A seeded graph runs it causally; its last
+      // logit picks the next block's first token.
+      const names = this.seeded ? ['logits', ...this.presentNames] : this.presentNames;
+      const out = await this.session.run(blockFeeds(start, ids, past, this.seeded), names);
+      forwards++;
+      for (const t of past) t.dispose?.();
+      past = this.presentNames.map((n) => out[n]);
+      if (wantLogits !== 'last') { out.logits?.dispose?.(); return null; }
+      const V = out.logits.dims[2];
+      return (await readLogits(out.logits)).slice((ids.length - 1) * V, ids.length * V);
+    };
+
+    let res;
+    try {
+      res = await denoise({
+        forward,
+        promptIds,
+        maskId: Number(MASK),
+        eosIds: [Number(EOS)],
+        blockSize: cfg.blockSize,
+        maxNewTokens: cfg.maxNewTokens,
+        threshold: cfg.threshold,
+        steps: cfg.steps,
+        temperature: cfg.temperature,
+        remasking: cfg.remasking,
+        seed: this.seeded,
+        alignToGrid: cfg.blockCausal && !this.seeded,
+        stopAtEos: this.seeded,              // as upstream generate does
+        yieldEvery: cfg.yieldEvery,
+        onStep: cfg.onStep && ((s) => {
+          sync(s.canvas, s.start, s.end);
+          cfg.onStep({ x, P, fresh: s.fresh, block: s.block, numBlocks: s.numBlocks, forward: forwards, elapsedMs: s.elapsedMs });
+        }),
+      });
+    } finally {
+      if (past) for (const t of past) t.dispose?.();
     }
-    if (past) for (const t of past) t.dispose?.();
+    sync(res.canvas, 0, T);
 
-    const seconds = (performance.now() - t0) / 1000;
-
-    // Trim at the first EOS after the prompt.
-    let genEnd = T;
-    for (let i = P; i < T; i++) if (x[i] === EOS) { genEnd = i; break; }
-    const tokenIds = [...x.slice(P, genEnd)].map(Number);
+    const tokenIds = res.tokenIds;
     let text = this.decode(tokenIds, { skip_special_tokens: true });
     if (cfg.stripThink) text = stripThinkBlock(text);
 
@@ -437,9 +328,9 @@ export class DiffusionLM {
       text,
       tokenIds,
       tokens: tokenIds.length,
-      forwards: forward,
-      seconds,
-      tokensPerSecond: tokenIds.length / seconds,
+      forwards,
+      seconds: res.seconds,
+      tokensPerSecond: tokenIds.length / res.seconds,
       x,
       P,
     };

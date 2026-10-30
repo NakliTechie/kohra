@@ -3,6 +3,23 @@
 All notable changes to kohra are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `denoise.js`: the block-diffusion decoding loop as a module with no runtime inside. The caller
+  supplies one `forward({ mode: 'preview' | 'commit', start, ids, wantLogits })` callback.
+  diskformer's `clover_moe` engine drives it for Clover-35B-A3B-Preview.
+- Clover's decoding rules as options and `PRESETS.clover`: strict `> 0.95` threshold, mask logit
+  suppressed, 32-preview limit per block, response-only presence / frequency / repetition
+  penalties with the length and think-end ramps (fp32-exact against `CloverPenaltyState.apply`),
+  stop after a resolved block, full last block trimmed to `maxNewTokens`.
+- Optional `top1` preview fast path for greedy, penalty-free runs; falls back to full logits.
+- `onBlock({ tokens })` event after each resolved block, for streaming.
+
+### Changed
+- `DiffusionLM.generate` runs on `denoise.js`. Same tokens, forwards, session calls and step
+  events as 0.3.1 on 240 fake-session configurations.
+
 ## [0.3.1] — 2026-10-24
 
 ### Added
