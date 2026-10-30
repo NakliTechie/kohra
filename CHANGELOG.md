@@ -3,7 +3,7 @@
 All notable changes to kohra are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-10-30
 
 ### Added
 - `denoise.js`: the block-diffusion decoding loop as a module with no runtime inside. The caller
@@ -90,6 +90,9 @@ onnxruntime-web 1.30.0 and the tokenizer from a CDN at runtime.
 - The yield `MessageChannel` holds a Node ref only while a yield is pending, so the module
   neither hangs nor exits early under Node.
 
+[0.4.0]: https://github.com/NakliTechie/kohra/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/NakliTechie/kohra/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/NakliTechie/kohra/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/NakliTechie/kohra/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/NakliTechie/kohra/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/NakliTechie/kohra/releases/tag/v0.1.0
